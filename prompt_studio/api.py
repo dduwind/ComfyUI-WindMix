@@ -1,0 +1,1437 @@
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+from io import BytesIO
+from pathlib import Path
+from urllib.parse import urlencode
+
+from aiohttp import web
+from server import PromptServer
+
+import folder_paths
+
+try:
+    from PIL import Image, ImageOps
+except Exception:
+    Image = None
+    ImageOps = None
+
+try:
+    from ruamel.yaml import YAML
+except Exception:
+    YAML = None
+
+from .model_info import build_model_payload, save_model_notes
+
+
+NODE_DIR = Path(__file__).resolve().parent
+PACKAGE_DIR = NODE_DIR.parent
+CUSTOM_NODES_DIR = PACKAGE_DIR.parent
+WEB_DIR = PACKAGE_DIR / "web"
+PROMPT_STATIC_DIR = WEB_DIR / "prompt_static"
+PROMPT_BUNDLE_DIR = WEB_DIR / "prompt_bundle"
+PROMPT_BUNDLE_FILE = PROMPT_BUNDLE_DIR / "main.entry.js"
+
+STORAGE_DIR = NODE_DIR / "storage"
+AUTOCOMPLETE_DIR = STORAGE_DIR / "autocomplete"
+GROUP_TAGS_DIR = STORAGE_DIR / "group_tags"
+LOCAL_COMPLETE_TAGS_DIR = STORAGE_DIR / "local_complete_tags"
+NOTES_DIR = STORAGE_DIR / "notes"
+PROMPT_DATA_DIR = STORAGE_DIR / "prompt_data"
+CUSTOM_WORDS_PATH = AUTOCOMPLETE_DIR / "custom_words.csv"
+AUTOCOMPLETE_WORDS_PATH = AUTOCOMPLETE_DIR / "autocomplete.txt"
+
+LEGACY_DISABLED_DIR = CUSTOM_NODES_DIR / ".disabled" / "weilin-comfyui-prompt-all-in-one-page-unlock"
+LEGACY_SRC_DIR = LEGACY_DISABLED_DIR / "src"
+LEGACY_CONFIG_DIR = LEGACY_SRC_DIR / "functional" / "config"
+LEGACY_CUSTOM_WORDS_PATH = LEGACY_SRC_DIR / "prompt_storage" / "autocomplete" / "autocomplete" / "autocomplete.txt"
+LEGACY_GROUP_TAGS_DIR = LEGACY_SRC_DIR / "prompt_storage" / "group_tags" / "group_tags"
+LEGACY_LOCAL_COMPLETE_TAGS_DIR = LEGACY_SRC_DIR / "prompt_storage" / "local_complete_tags" / "local_complete_tags"
+LEGACY_PROMPT_DATA_DIR = LEGACY_SRC_DIR / "prompt_storage" / "data" / "prompt_storage"
+LEGACY_PROMPT_STATIC_DIR = LEGACY_SRC_DIR / "ui" / "web_static" / "prompt_static"
+LEGACY_PROMPT_BUNDLE_FILE = LEGACY_SRC_DIR / "ui" / "web_bundle" / "prompt_js" / "main.entry.js"
+LEGACY_I18N_PATH = LEGACY_CONFIG_DIR / "i18n.json"
+LEGACY_TRANSLATE_APIS_PATH = LEGACY_CONFIG_DIR / "translate_apis.json"
+
+ROUTES_REGISTERED = False
+_TEXT_CACHE: dict[str, tuple[tuple[int, int], str]] = {}
+_VALUE_CACHE: dict[str, tuple[float, object]] = {}
+_FOLDER_LIST_CACHE_TTL = 20.0
+# 模型「同名预览图」的后缀，按优先级排列：先显式 .preview.*，再裸文件名同名。
+# 覆盖 ComfyUI-Lora-Manager 认的图片后缀（其 py/utils/constants.py 的
+# PREVIEW_EXTENSIONS），但刻意不含 .mp4/.webm —— 浮窗用 <img> 渲染，视频放不进去。
+_PREVIEW_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".avif", ".gif", ".jxl")
+_PREVIEW_EXTS = tuple(f".preview{e}" for e in _PREVIEW_IMAGE_EXTS) + _PREVIEW_IMAGE_EXTS
+_PREVIEW_THUMB_CACHE: dict[str, tuple[tuple[int, int], bytes, str]] = {}
+_PREVIEW_THUMB_MAX_SIZE = 320
+
+
+def _ensure_dirs() -> None:
+    AUTOCOMPLETE_DIR.mkdir(parents=True, exist_ok=True)
+    GROUP_TAGS_DIR.mkdir(parents=True, exist_ok=True)
+    LOCAL_COMPLETE_TAGS_DIR.mkdir(parents=True, exist_ok=True)
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    PROMPT_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    PROMPT_BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _read_text_best_effort(path: Path) -> str:
+    for encoding in ("utf-8", "utf-8-sig", "gbk", "gb18030"):
+        try:
+            return path.read_text(encoding=encoding)
+        except Exception:
+            continue
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _read_text_cached(path: Path) -> str:
+    """Cache large static text assets until mtime/size changes."""
+    stat = path.stat()
+    signature = (stat.st_mtime_ns, stat.st_size)
+    cache_key = str(path)
+    cached = _TEXT_CACHE.get(cache_key)
+    if cached and cached[0] == signature:
+        return cached[1]
+    text = _read_text_best_effort(path)
+    _TEXT_CACHE[cache_key] = (signature, text)
+    return text
+
+
+def _get_cached_value(key: str, ttl_seconds: float, builder):
+    now = time.monotonic()
+    cached = _VALUE_CACHE.get(key)
+    if cached and now - cached[0] < ttl_seconds:
+        return cached[1]
+    value = builder()
+    _VALUE_CACHE[key] = (now, value)
+    return value
+
+
+def _get_folder_filename_list(kind: str) -> list[str]:
+    def build():
+        try:
+            return list(folder_paths.get_filename_list(kind))
+        except Exception:
+            return []
+
+    return list(_get_cached_value(f"folder_paths:{kind}", _FOLDER_LIST_CACHE_TTL, build))
+
+
+def _normalize_model_type(model_type: str) -> str:
+    text = str(model_type or "").strip().lower()
+    if text == "lora":
+        return "loras"
+    if text in {"embedding", "textual inversion", "textual_inversion"}:
+        return "embeddings"
+    return text
+
+
+def _resolve_model_path(model_type: str, model_name: str) -> Path | None:
+    """把「模型名 / 相对路径」解析成磁盘上的真实文件路径。
+
+    model_type 是 folder_paths 的 folder key（loras / diffusion_models / checkpoints /
+    embeddings / unet ...）。未知 key 会抛异常，一律当作「找不到」返回 None。
+    model_name 允许是带扩展名的相对路径（`XL\\foo.safetensors`）、去扩展名路径
+    （`XL\\foo`）或裸文件名（`foo.safetensors` / `foo`），逐一比对。
+    """
+    normalized_type = _normalize_model_type(model_type)
+    model_name = str(model_name or "").strip()
+    if not normalized_type or not model_name:
+        return None
+
+    lowered = model_name.replace("/", "\\").lower()
+    try:
+        filenames = folder_paths.get_filename_list(normalized_type)
+    except Exception:
+        return None
+
+    for filename in filenames:
+        filename_norm = str(filename).replace("/", "\\")
+        stem_norm = os.path.splitext(filename_norm)[0]
+        basename_norm = Path(filename_norm).name
+        basename_stem = Path(filename_norm).stem
+        candidates = {
+            filename_norm.lower(),
+            stem_norm.lower(),
+            basename_norm.lower(),
+            basename_stem.lower(),
+        }
+        if lowered in candidates:
+            full_path = folder_paths.get_full_path(normalized_type, filename)
+            return Path(full_path) if full_path else None
+    return None
+
+
+def _find_preview_path(model_path: Path | None) -> Path | None:
+    """在模型文件所在目录找同名预览图；找不到返回 None（前端据此不显示浮窗）。
+
+    支持两类命名，均按 _PREVIEW_EXTS 的顺序（先 `.preview.*` 再裸名）：
+      - 去掉模型扩展名：`foo.safetensors` → `foo.preview.png` / `foo.png`
+      - 保留完整文件名：`foo.safetensors` → `foo.safetensors.preview.png` / `foo.safetensors.png`
+        （CivitAI 那系下载器会把图存成 <完整文件名>.png）
+    Windows 上 Path.exists() 不区分大小写，`.PNG` 之类也能命中。
+    """
+    if model_path is None:
+        return None
+    stem_path = model_path.with_suffix("")
+    bases = [str(stem_path)]
+    if stem_path.name != model_path.name:
+        bases.append(str(model_path))
+    for base in bases:
+        for ext in _PREVIEW_EXTS:
+            candidate = Path(base + ext)
+            if candidate.exists() and candidate.is_file():
+                return candidate
+    return None
+
+
+def _model_preview_url(model_type: str, model_name: str) -> str | None:
+    preview_path = _find_preview_path(_resolve_model_path(model_type, model_name))
+    if preview_path is None:
+        return None
+    try:
+        stat = preview_path.stat()
+        version = f"{stat.st_mtime_ns:x}-{stat.st_size:x}"
+    except Exception:
+        version = str(int(time.time()))
+    return "/WM_studio/prompt-studio/model-preview?" + urlencode({
+        "type": _normalize_model_type(model_type),
+        "name": model_name,
+        "v": version,
+    })
+
+
+def _preview_response(preview_path: Path) -> web.StreamResponse:
+    suffix = preview_path.suffix.lower()
+    if Image is None or suffix == ".gif":
+        response = web.FileResponse(preview_path)
+        response.headers["Cache-Control"] = "public, max-age=3600"
+        return response
+
+    stat = preview_path.stat()
+    signature = (stat.st_mtime_ns, stat.st_size)
+    cache_key = str(preview_path)
+    cached = _PREVIEW_THUMB_CACHE.get(cache_key)
+    if cached and cached[0] == signature:
+        return web.Response(
+            body=cached[1],
+            content_type=cached[2],
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+
+    try:
+        with Image.open(preview_path) as img:
+            if ImageOps is not None:
+                img = ImageOps.exif_transpose(img)
+            img.thumbnail((_PREVIEW_THUMB_MAX_SIZE, _PREVIEW_THUMB_MAX_SIZE))
+            has_alpha = img.mode in {"RGBA", "LA"} or "transparency" in img.info
+            buffer = BytesIO()
+            if has_alpha:
+                img.save(buffer, format="PNG", optimize=True)
+                content_type = "image/png"
+            else:
+                img = img.convert("RGB")
+                img.save(buffer, format="JPEG", quality=85, optimize=True)
+                content_type = "image/jpeg"
+            body = buffer.getvalue()
+    except Exception:
+        response = web.FileResponse(preview_path)
+        response.headers["Cache-Control"] = "public, max-age=3600"
+        return response
+
+    _PREVIEW_THUMB_CACHE[cache_key] = (signature, body, content_type)
+    return web.Response(body=body, content_type=content_type, headers={"Cache-Control": "public, max-age=3600"})
+
+
+def _lora_user_info_path(sha256: str) -> Path:
+    return NOTES_DIR / "lorainfo" / f"{sha256}.json"
+
+
+def _read_lora_user_info(sha256: str) -> dict:
+    path = _lora_user_info_path(sha256)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_lora_user_info(sha256: str, data: dict) -> None:
+    path = _lora_user_info_path(sha256)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _legacy_lora_info_payload(file_name: str) -> dict | None:
+    payload = build_model_payload("loras", file_name, NOTES_DIR)
+    if payload is None:
+        return None
+
+    saved = _read_lora_user_info(payload["sha256"])
+    preview_url = _model_preview_url("loras", file_name)
+    images = [{"url": preview_url}] if preview_url else []
+    metadata = payload.get("metadata") or {}
+    trained_words = payload.get("trained_words") or []
+    name = saved.get("name") or metadata.get("ss_output_name") or metadata.get("modelspec.title") or payload.get("name") or ""
+
+    return {
+        "file": file_name,
+        "path": payload.get("path", ""),
+        "name": name,
+        "sha256": payload.get("sha256", ""),
+        "baseModel": payload.get("base_model", ""),
+        "baseModelFile": str(metadata.get("ss_sd_model_name") or ""),
+        "images": images,
+        "trainedWords": trained_words,
+        "raw": {"metadata": metadata},
+        "strengthMin": saved.get("strengthMin", ""),
+        "strengthMax": saved.get("strengthMax", ""),
+        "userNote": saved.get("userNote", payload.get("notes", "")),
+        "loraWorks": saved.get("loraWorks", ""),
+        "civitaiUrl": saved.get("civitaiUrl", ""),
+    }
+
+
+def _custom_words_source() -> Path | None:
+    if CUSTOM_WORDS_PATH.exists():
+        return CUSTOM_WORDS_PATH
+    if AUTOCOMPLETE_WORDS_PATH.exists():
+        return AUTOCOMPLETE_WORDS_PATH
+    if LEGACY_CUSTOM_WORDS_PATH.exists():
+        return LEGACY_CUSTOM_WORDS_PATH
+    return None
+
+
+def _sanitize_key(key: str) -> str:
+    safe = []
+    for ch in str(key):
+        if ch.isalnum() or ch in ("_", "-", "."):
+            safe.append(ch)
+        else:
+            safe.append("_")
+    text = "".join(safe).strip("._")
+    return text or "default"
+
+
+def _storage_path_for_key(key: str) -> Path:
+    safe = _sanitize_key(key)
+    return PROMPT_DATA_DIR / f"{safe}.json"
+
+
+def _storage_read_path_for_key(key: str) -> Path:
+    primary_path = _storage_path_for_key(key)
+    if primary_path.exists():
+        return primary_path
+    legacy_path = LEGACY_PROMPT_DATA_DIR / f"{_sanitize_key(key)}.json"
+    if legacy_path.exists():
+        return legacy_path
+    return primary_path
+
+
+def _storage_get(key: str):
+    path = _storage_read_path_for_key(key)
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+    try:
+        return json.loads(_read_text_best_effort(path))
+    except Exception:
+        return None
+
+
+def _storage_set(key: str, data) -> Path:
+    path = _storage_path_for_key(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _storage_delete(key: str) -> None:
+    path = _storage_path_for_key(key)
+    if path.exists():
+        path.unlink()
+
+
+def _storage_get_list(key: str) -> list:
+    data = _storage_get(key)
+    return data if isinstance(data, list) else []
+
+
+def _storage_list_push(key: str, item):
+    data = _storage_get_list(key)
+    data.append(item)
+    _storage_set(key, data)
+    return item
+
+
+def _storage_list_pop(key: str):
+    data = _storage_get_list(key)
+    item = data.pop() if data else None
+    _storage_set(key, data)
+    return item
+
+
+def _storage_list_shift(key: str):
+    data = _storage_get_list(key)
+    item = data.pop(0) if data else None
+    _storage_set(key, data)
+    return item
+
+
+def _storage_list_remove(key: str, index: int):
+    data = _storage_get_list(key)
+    if 0 <= index < len(data):
+        data.pop(index)
+    _storage_set(key, data)
+
+
+def _storage_list_get(key: str, index: int):
+    data = _storage_get_list(key)
+    if 0 <= index < len(data):
+        return data[index]
+    return None
+
+
+def _storage_list_clear(key: str):
+    _storage_set(key, [])
+
+
+def _copy_legacy_bundle_if_needed() -> None:
+    if PROMPT_BUNDLE_FILE.exists() or not LEGACY_PROMPT_BUNDLE_FILE.exists():
+        return
+    PROMPT_BUNDLE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PROMPT_BUNDLE_FILE.write_text(_read_text_best_effort(LEGACY_PROMPT_BUNDLE_FILE), encoding="utf-8")
+
+
+def _list_loras() -> list[str]:
+    names = []
+    for filename in _get_folder_filename_list("loras"):
+        names.append(os.path.splitext(filename)[0])
+    return sorted(set(names), key=str.lower)
+
+
+def _list_embeddings() -> list[str]:
+    return sorted({os.path.splitext(name)[0] for name in _get_folder_filename_list("embeddings")}, key=str.lower)
+
+
+def _build_extra_networks():
+    lora_items = []
+    for item_path in _get_folder_filename_list("loras"):
+        full_path = folder_paths.get_full_path("loras", item_path)
+        model_name = os.path.splitext(item_path)[0]
+        file_name = os.path.basename(item_path)
+        dirname = os.path.dirname(full_path) if full_path else ""
+        lora_items.append({
+            "basename": item_path,
+            "name": item_path,
+            "dirname": dirname,
+            "filename": full_path or item_path,
+            "description": "",
+            "preview": _model_preview_url("loras", item_path),
+            "model_name": model_name,
+            "model_type": "loras",
+            "model_filename": file_name,
+            "output_name": model_name,
+            "prompt": f"<lora:{item_path}:",
+            "local_info": None,
+        })
+    embedding_items = []
+    for item_path in _get_folder_filename_list("embeddings"):
+        full_path = folder_paths.get_full_path("embeddings", item_path)
+        model_name = os.path.splitext(item_path)[0]
+        file_name = os.path.basename(item_path)
+        dirname = os.path.dirname(full_path) if full_path else ""
+        embedding_items.append({
+            "basename": item_path,
+            "name": item_path,
+            "dirname": dirname,
+            "filename": full_path or item_path,
+            "description": "",
+            "preview": _model_preview_url("embeddings", item_path),
+            "model_name": model_name,
+            "model_type": "embeddings",
+            "model_filename": file_name,
+            "output_name": model_name,
+            "prompt": model_name,
+            "local_info": None,
+        })
+    result = []
+    if lora_items:
+        result.append({"name": "lora", "title": "Lora", "items": lora_items})
+    if embedding_items:
+        result.append({"name": "textual inversion", "title": "Embedding", "items": embedding_items})
+    return result
+
+
+def _extra_networks_response_text() -> str:
+    def build() -> str:
+        return json.dumps(
+            {"extra_networks": _build_extra_networks()},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    return str(_get_cached_value("prompt_studio:extra_networks_response_text", _FOLDER_LIST_CACHE_TTL, build))
+
+
+def _safe_join(root: Path, relative: str) -> Path | None:
+    rel = str(relative or "").replace("\\", "/").lstrip("/")
+    candidate = (root / rel).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except Exception:
+        return None
+    return candidate
+
+
+def _load_group_tags(lang: str) -> str:
+    source_dir = GROUP_TAGS_DIR if GROUP_TAGS_DIR.exists() else LEGACY_GROUP_TAGS_DIR
+    if not source_dir.exists():
+        return ""
+
+    def get_tags_file(name: str) -> Path:
+        return source_dir / f"{name}.yaml"
+
+    tags_file = get_tags_file("custom")
+    custom_valid = False
+    if tags_file.exists():
+        try:
+            custom_valid = bool(_read_text_best_effort(tags_file).strip())
+        except Exception:
+            custom_valid = False
+    if not custom_valid:
+        tags_file = get_tags_file(lang)
+        if not tags_file.exists():
+            tags_file = get_tags_file("default")
+    if not tags_file.exists():
+        return ""
+
+    parts: list[str] = []
+    for extra_name in ("prepend", None, "append"):
+        try:
+            path = tags_file if extra_name is None else get_tags_file(extra_name)
+            if path.exists():
+                text = _read_text_cached(path).strip()
+                if text:
+                    parts.append(text)
+        except Exception:
+            continue
+    return "\n\n".join(parts)
+
+
+def _group_tags_dir() -> Path:
+    return GROUP_TAGS_DIR if GROUP_TAGS_DIR.exists() else LEGACY_GROUP_TAGS_DIR
+
+
+def _group_tags_file(name: str) -> Path:
+    return _group_tags_dir() / f"{name}.yaml"
+
+
+def _group_tags_active_file(lang: str) -> Path | None:
+    source_dir = _group_tags_dir()
+    if not source_dir.exists():
+        return None
+
+    custom = source_dir / "custom.yaml"
+    if custom.exists():
+        try:
+            if _read_text_best_effort(custom).strip():
+                return custom
+        except Exception:
+            pass
+
+    lang_file = source_dir / f"{lang}.yaml"
+    if lang_file.exists():
+        return lang_file
+    default_file = source_dir / "default.yaml"
+    return default_file if default_file.exists() else None
+
+
+def _yaml_instance():
+    if YAML is None:
+        raise RuntimeError("ruamel.yaml is required for group tag editing")
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    yaml.width = 100000
+    return yaml
+
+
+def _ensure_custom_group_tags_file(lang: str) -> Path:
+    GROUP_TAGS_DIR.mkdir(parents=True, exist_ok=True)
+    custom = GROUP_TAGS_DIR / "custom.yaml"
+    if custom.exists():
+        try:
+            if _read_text_best_effort(custom).strip():
+                return custom
+        except Exception:
+            pass
+
+    source = _group_tags_active_file(lang)
+    if source is not None and source.exists():
+        custom.write_text(_read_text_best_effort(source), encoding="utf-8")
+    else:
+        custom.write_text("[]\n", encoding="utf-8")
+    return custom
+
+
+def _load_editable_group_tags(lang: str):
+    yaml = _yaml_instance()
+    path = _ensure_custom_group_tags_file(lang)
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.load(handle)
+    if data is None:
+        data = []
+    if not isinstance(data, list):
+        raise ValueError("group tag YAML root must be a list")
+    return yaml, path, data
+
+
+def _save_editable_group_tags(yaml, path: Path, data) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        yaml.dump(data, handle)
+    _TEXT_CACHE.pop(str(path), None)
+    _VALUE_CACHE.pop("prompt_studio:extra_networks_response_text", None)
+
+
+def _find_group(data, group_name: str):
+    for group in data:
+        if isinstance(group, dict) and group.get("name") == group_name:
+            return group
+    return None
+
+
+def _find_subgroup(group, subgroup_name: str):
+    if not isinstance(group, dict):
+        return None
+    groups = group.setdefault("groups", [])
+    for subgroup in groups:
+        if isinstance(subgroup, dict) and subgroup.get("name") == subgroup_name:
+            return subgroup
+    return None
+
+
+def _group_tag_response(ok: bool = True, **extra):
+    payload = {"info": "ok" if ok else "error", "success": bool(ok)}
+    payload.update(extra)
+    return web.json_response(payload, status=200 if ok else 400)
+
+
+async def _request_json_dict(request) -> dict:
+    try:
+        data = await request.json()
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _list_csvs():
+    csvs = []
+    seen = set()
+    for source_dir in (LOCAL_COMPLETE_TAGS_DIR, LEGACY_LOCAL_COMPLETE_TAGS_DIR):
+        if not source_dir.exists():
+            continue
+        for file in sorted(source_dir.glob("*.csv")):
+            if file.name in seen:
+                continue
+            seen.add(file.name)
+            csvs.append({
+                "key": file.name,
+                "name": file.name,
+                "size": file.stat().st_size,
+                "path": str(file),
+            })
+    return csvs
+
+
+def _resolve_csv_path(key: str) -> Path | None:
+    if not key:
+        return None
+    for source_dir in (LOCAL_COMPLETE_TAGS_DIR, LEGACY_LOCAL_COMPLETE_TAGS_DIR):
+        candidate = source_dir / Path(key).name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _load_json_file(path: Path, default):
+    try:
+        if path.exists():
+            return json.loads(_read_text_best_effort(path))
+    except Exception:
+        pass
+    return default
+
+
+def _load_i18n():
+    return _load_json_file(LEGACY_I18N_PATH, {"default": "zh_CN", "languages": []})
+
+
+def _load_translate_apis():
+    # Legacy Prompt Studio frontend expects a list here.
+    return []
+
+
+
+def _get_packages_state():
+    return {}
+
+
+def _get_extensions():
+    extensions_dir = CUSTOM_NODES_DIR / "extensions"
+    if not extensions_dir.exists():
+        return []
+    result = []
+    for item in sorted(extensions_dir.iterdir()):
+        if item.is_dir():
+            result.append(item.name)
+    return result
+
+
+def _get_extension_css_list():
+    styles_extensions_dir = PROMPT_STATIC_DIR / "styles" / "extensions"
+    if not styles_extensions_dir.exists():
+        styles_extensions_dir = LEGACY_PROMPT_STATIC_DIR / "styles" / "extensions"
+    if not styles_extensions_dir.exists():
+        return []
+
+    css_list = []
+    for item in sorted(styles_extensions_dir.iterdir()):
+        if not item.is_dir():
+            continue
+        manifest_path = item / "manifest.json"
+        style_path = item / "style.min.css"
+        if not manifest_path.exists() or not style_path.exists():
+            continue
+        css_list.append({
+            "dir": item.name,
+            "dataName": f"extensionSelect.{item.name}",
+            "selected": bool(_storage_get(f"extensionSelect.{item.name}")),
+            "manifest": _read_text_best_effort(manifest_path),
+            "style": f"extensions/{item.name}/style.min.css",
+        })
+    return css_list
+
+
+class _HistoryStore:
+    def __init__(self):
+        self.types = ["txt2img", "txt2img_neg", "img2img", "img2img_neg"]
+        self.max_count = 100
+
+    def _history_key(self, type_name: str) -> str:
+        return f"history.{type_name}"
+
+    def _favorite_key(self, type_name: str) -> str:
+        return f"favorite.{type_name}"
+
+    def get_histories(self, type_name: str):
+        items = _storage_get_list(self._history_key(type_name))
+        favorite_ids = {item.get("id") for item in self.get_favorites(type_name)}
+        for item in items:
+            item["is_favorite"] = item.get("id") in favorite_ids
+        return items
+
+    def get_favorites(self, type_name: str):
+        return _storage_get_list(self._favorite_key(type_name))
+
+    def _save_histories(self, type_name: str, items):
+        _storage_set(self._history_key(type_name), items)
+
+    def _save_favorites(self, type_name: str, items):
+        _storage_set(self._favorite_key(type_name), items)
+
+    def push_history(self, type_name: str, tags, prompt, name=""):
+        import time
+        import uuid
+        items = self.get_histories(type_name)
+        if len(items) >= self.max_count:
+            items = items[-(self.max_count - 1):]
+        item = {"id": str(uuid.uuid1()), "time": int(time.time()), "name": name, "tags": tags, "prompt": prompt}
+        items.append(item)
+        self._save_histories(type_name, items)
+        return item
+
+    def push_favorite(self, type_name: str, tags, prompt, name=""):
+        import time
+        import uuid
+        items = self.get_favorites(type_name)
+        item = {"id": str(uuid.uuid1()), "time": int(time.time()), "name": name, "tags": tags, "prompt": prompt}
+        items.append(item)
+        self._save_favorites(type_name, items)
+        return item
+
+    def move_up_favorite(self, type_name: str, item_id: str):
+        items = self.get_favorites(type_name)
+        for idx, item in enumerate(items):
+            if item.get("id") == item_id:
+                if idx > 0:
+                    items.insert(idx - 1, items.pop(idx))
+                    self._save_favorites(type_name, items)
+                    return True
+                return False
+        return False
+
+    def move_down_favorite(self, type_name: str, item_id: str):
+        items = self.get_favorites(type_name)
+        for idx, item in enumerate(items):
+            if item.get("id") == item_id:
+                if idx < len(items) - 1:
+                    items.insert(idx + 1, items.pop(idx))
+                    self._save_favorites(type_name, items)
+                    return True
+                return False
+        return False
+
+    def get_latest_history(self, type_name: str):
+        items = self.get_histories(type_name)
+        return items[-1] if items else None
+
+    def set_history(self, type_name: str, item_id: str, tags, prompt, name):
+        items = self.get_histories(type_name)
+        changed = False
+        for item in items:
+            if item.get("id") == item_id:
+                item.update({"tags": tags, "prompt": prompt, "name": name})
+                changed = True
+                break
+        if changed:
+            self._save_histories(type_name, items)
+            self.set_favorite(type_name, item_id, tags, prompt, name)
+        return changed
+
+    def set_favorite(self, type_name: str, item_id: str, tags, prompt, name):
+        items = self.get_favorites(type_name)
+        changed = False
+        for item in items:
+            if item.get("id") == item_id:
+                item.update({"tags": tags, "prompt": prompt, "name": name})
+                changed = True
+                break
+        if changed:
+            self._save_favorites(type_name, items)
+        return changed
+
+    def set_history_name(self, type_name: str, item_id: str, name: str):
+        items = self.get_histories(type_name)
+        changed = False
+        for item in items:
+            if item.get("id") == item_id:
+                item["name"] = name
+                changed = True
+                break
+        if changed:
+            self._save_histories(type_name, items)
+            self.set_favorite_name(type_name, item_id, name)
+        return changed
+
+    def set_favorite_name(self, type_name: str, item_id: str, name: str):
+        items = self.get_favorites(type_name)
+        changed = False
+        for item in items:
+            if item.get("id") == item_id:
+                item["name"] = name
+                changed = True
+                break
+        if changed:
+            self._save_favorites(type_name, items)
+        return changed
+
+    def dofavorite(self, type_name: str, item_id: str):
+        if any(item.get("id") == item_id for item in self.get_favorites(type_name)):
+            return False
+        for item in self.get_histories(type_name):
+            if item.get("id") == item_id:
+                favorites = self.get_favorites(type_name)
+                favorites.append(item)
+                self._save_favorites(type_name, favorites)
+                return True
+        return False
+
+    def unfavorite(self, type_name: str, item_id: str):
+        items = self.get_favorites(type_name)
+        new_items = [item for item in items if item.get("id") != item_id]
+        if len(new_items) == len(items):
+            return False
+        self._save_favorites(type_name, new_items)
+        return True
+
+    def remove_history(self, type_name: str, item_id: str):
+        items = self.get_histories(type_name)
+        new_items = [item for item in items if item.get("id") != item_id]
+        if len(new_items) == len(items):
+            return False
+        self._save_histories(type_name, new_items)
+        return True
+
+    def remove_histories(self, type_name: str):
+        self._save_histories(type_name, [])
+        return True
+
+
+def _guess_lang(request) -> str:
+    return str(request.query.get("lang", "zh_CN") or "zh_CN")
+
+
+def register_prompt_studio_routes():
+    global ROUTES_REGISTERED
+    if ROUTES_REGISTERED:
+        return True
+
+    _ensure_dirs()
+    _copy_legacy_bundle_if_needed()
+    prompt_server = getattr(PromptServer, "instance", None)
+    if prompt_server is None:
+        return False
+    routes = prompt_server.routes
+    history = _HistoryStore()
+
+    @routes.get("/WM_studio/prompt-studio/autocomplete/custom")
+    async def prompt_studio_get_custom_words(request):
+        source = _custom_words_source()
+        if source is not None:
+            return web.FileResponse(source)
+        return web.Response(status=200, text="")
+
+    @routes.post("/WM_studio/prompt-studio/autocomplete/custom")
+    async def prompt_studio_save_custom_words(request):
+        CUSTOM_WORDS_PATH.write_text(await request.text(), encoding="utf-8")
+        return web.json_response({"status": "ok"})
+
+    @routes.get("/WM_studio/prompt-studio/autocomplete/loras")
+    async def prompt_studio_get_loras(request):
+        return web.json_response(_list_loras())
+
+    @routes.get("/WM_studio/prompt-studio/model-info")
+    async def prompt_studio_get_model_info(request):
+        model_type = str(request.query.get("type", "loras")).strip()
+        model_name = str(request.query.get("name", "")).strip()
+        payload = build_model_payload(model_type, model_name, NOTES_DIR)
+        if payload is None:
+            return web.json_response({"status": "error", "error": "model_not_found"}, status=404)
+        return web.json_response({"status": "ok", "data": payload})
+
+    @routes.get("/WM_studio/prompt-studio/model-preview")
+    async def prompt_studio_get_model_preview(request):
+        model_type = str(request.query.get("type", "loras")).strip()
+        model_name = str(request.query.get("name", "")).strip()
+        preview_path = _find_preview_path(_resolve_model_path(model_type, model_name))
+        if preview_path is None:
+            return web.Response(status=404, text="preview_not_found")
+        return _preview_response(preview_path)
+
+    @routes.post("/WM_studio/prompt-studio/model-info/notes")
+    async def prompt_studio_save_model_notes(request):
+        model_type = str(request.query.get("type", "loras")).strip()
+        model_name = str(request.query.get("name", "")).strip()
+        payload = save_model_notes(model_type, model_name, await request.text(), NOTES_DIR)
+        if payload is None:
+            return web.json_response({"status": "error", "error": "model_not_found"}, status=404)
+        return web.json_response({"status": "ok", "data": payload})
+
+    @routes.get("/WM_prompt/lorainfo/api/loras/info")
+    async def prompt_studio_legacy_lora_info(request):
+        file_name = str(request.query.get("file", "")).strip()
+        payload = _legacy_lora_info_payload(file_name)
+        if payload is None:
+            return web.json_response({"status": 404, "error": "No Lora found at path"}, status=404)
+        return web.json_response({"status": 200, "data": payload})
+
+    @routes.get("/WM_prompt/lorainfo/api/loras/info/refresh")
+    async def prompt_studio_legacy_lora_info_refresh(request):
+        file_name = str(request.query.get("file", "")).strip()
+        payload = _legacy_lora_info_payload(file_name)
+        if payload is None:
+            return web.json_response({"status": 404, "error": "No Lora found at path"}, status=404)
+        return web.json_response({"status": 200, "data": payload})
+
+    @routes.get("/WM_prompt/lorainfo/api/loras/info/clear")
+    async def prompt_studio_legacy_lora_info_clear(request):
+        file_name = str(request.query.get("file", "")).strip()
+        payload = build_model_payload("loras", file_name, NOTES_DIR)
+        if payload is None:
+            return web.json_response({"status": 404, "error": "No Lora found at path"}, status=404)
+        path = _lora_user_info_path(payload["sha256"])
+        if path.exists():
+            path.unlink()
+        return web.json_response({"status": 200, "data": _legacy_lora_info_payload(file_name)})
+
+    @routes.post("/WM_prompt/lorainfo/api/loras/info")
+    async def prompt_studio_legacy_lora_info_save(request):
+        file_name = str(request.query.get("file", "")).strip()
+        payload = build_model_payload("loras", file_name, NOTES_DIR)
+        if payload is None:
+            return web.json_response({"status": 404, "error": "No Lora found at path"}, status=404)
+        form = await request.post()
+        raw_json = form.get("json", "{}")
+        try:
+            updates = json.loads(str(raw_json or "{}"))
+        except Exception:
+            updates = {}
+        if not isinstance(updates, dict):
+            updates = {}
+        saved = _read_lora_user_info(payload["sha256"])
+        for key in ("name", "strengthMin", "strengthMax", "userNote", "loraWorks", "civitaiUrl"):
+            if key in updates:
+                saved[key] = str(updates.get(key) or "")
+        _write_lora_user_info(payload["sha256"], saved)
+        return web.json_response({"status": 200, "data": _legacy_lora_info_payload(file_name)})
+
+    @routes.post("/WM_prompt/lorainfo/api/loras/set/img")
+    async def prompt_studio_legacy_lora_set_img(request):
+        form = await request.post()
+        file_name = str(form.get("path", "")).strip()
+        upload = form.get("image")
+        source_name = str(form.get("fileName", "") or "preview.png")
+        model_path = _resolve_model_path("loras", file_name)
+        if model_path is None or upload is None or not hasattr(upload, "file"):
+            return web.json_response({"status": 400, "error": "invalid_upload"}, status=400)
+        ext = Path(source_name).suffix.lower()
+        if ext not in {".jpg", ".jpeg", ".png", ".gif"}:
+            ext = ".png"
+        target = model_path.with_suffix(ext)
+        target.write_bytes(upload.file.read())
+        _PREVIEW_THUMB_CACHE.pop(str(target), None)
+        _VALUE_CACHE.pop("prompt_studio:extra_networks_response_text", None)
+        return web.json_response({"status": 200, "data": _legacy_lora_info_payload(file_name)})
+
+    @routes.get("/WM_sd-webui-prompt-all-in-one-js")
+    async def prompt_studio_legacy_bundle(request):
+        if PROMPT_BUNDLE_FILE.exists():
+            return web.Response(status=200, text=_read_text_cached(PROMPT_BUNDLE_FILE), content_type="application/javascript")
+        return web.Response(status=404, text="legacy bundle not found")
+
+    @routes.get("/WM_prompt/web_ui/{file_path:.*}")
+    async def prompt_studio_legacy_static(request):
+        file_path = request.match_info.get("file_path", "")
+        root = PROMPT_STATIC_DIR if PROMPT_STATIC_DIR.exists() else LEGACY_PROMPT_STATIC_DIR
+        target = _safe_join(root, file_path)
+        if target and target.is_file():
+            return web.FileResponse(target)
+        raise web.HTTPNotFound()
+
+    async def _serve_style_file(request):
+        rel = str(request.query.get("file", "")).strip()
+        target = _safe_join(PROMPT_STATIC_DIR / "styles", rel)
+        if target is None or not target.is_file():
+            target = _safe_join(LEGACY_PROMPT_STATIC_DIR / "styles", rel)
+        if target and target.is_file():
+            return web.FileResponse(target)
+        raise web.HTTPNotFound()
+
+    @routes.get("/WM_physton_prompt/styles")
+    async def prompt_studio_styles_alias(request):
+        return await _serve_style_file(request)
+
+    @routes.get("/WM_prompt/physton_prompt/styles")
+    async def prompt_studio_styles_legacy(request):
+        return await _serve_style_file(request)
+
+    def _try_register_exact_legacy_backend() -> bool:
+        if os.environ.get("STUDIO_SUITE_PROMPT_STUDIO_EXACT_LEGACY", "").strip() != "1":
+            return False
+        if not LEGACY_DISABLED_DIR.exists() or not LEGACY_SRC_DIR.exists():
+            return False
+        try:
+            legacy_root = str(LEGACY_DISABLED_DIR)
+            if legacy_root not in sys.path:
+                sys.path.insert(0, legacy_root)
+            import importlib
+            try:
+                import gradio  # noqa: F401
+            except Exception:
+                import types
+                dummy_gradio = types.ModuleType("gradio")
+                class _DummyBlocks:
+                    pass
+                dummy_gradio.Blocks = _DummyBlocks
+                sys.modules["gradio"] = dummy_gradio
+            importlib.import_module("src.functional.sd_webui_prompt_all_in_one_app.sd_webui_prompt_all_in_one.scripts.on_app_started")
+            importlib.import_module("src.functional.script.autocomplete")
+            return True
+        except Exception as exc:
+            print(f"[PromptStudio] exact legacy backend import failed: {exc}")
+            return False
+
+    if _try_register_exact_legacy_backend():
+        ROUTES_REGISTERED = True
+        return
+    @routes.get("/WM_prompt/physton_prompt/get_version")
+    async def prompt_studio_get_version(request):
+        return web.json_response({"version": "studio-suite-legacy-compat", "latest_version": "studio-suite-legacy-compat"})
+
+    @routes.get("/WM_prompt/physton_prompt/get_config")
+    async def prompt_studio_get_config(request):
+        return web.json_response({
+            "i18n": _load_i18n(),
+            "translate_apis": _load_translate_apis(),
+            "packages_state": _get_packages_state(),
+            "python": sys.executable,
+        })
+
+    @routes.get("/WM_prompt/physton_prompt/get_extensions")
+    async def prompt_studio_get_extensions(request):
+        return web.json_response({"extensions": _get_extensions(), "extends": _get_extensions()})
+
+    @routes.get("/WM_prompt/physton_prompt/get_extension_css_list")
+    async def prompt_studio_get_extension_css_list(request):
+        return web.json_response({"css_list": _get_extension_css_list()})
+
+    @routes.post("/WM_prompt/physton_prompt/token_counter")
+    async def prompt_studio_token_counter(request):
+        data = await request.json()
+        text = str(data.get("text", ""))
+        token_count = len([part for part in text.replace("\n", " ").split(" ") if part.strip()])
+        return web.json_response({"token_count": token_count, "max_length": 4096})
+
+    @routes.get("/WM_prompt/physton_prompt/get_data")
+    async def prompt_studio_get_data(request):
+        key = str(request.query.get("key", "")).strip()
+        return web.json_response({"data": _storage_get(key)})
+
+    @routes.get("/WM_prompt/physton_prompt/get_datas")
+    async def prompt_studio_get_datas(request):
+        keys = [item for item in str(request.query.get("keys", "")).split(",") if item]
+        return web.json_response({"datas": {key: _storage_get(key) for key in keys}})
+
+    @routes.post("/WM_prompt/physton_prompt/set_data")
+    async def prompt_studio_set_data(request):
+        data = await request.json()
+        key = str(data.get("key", "")).strip()
+        if not key:
+            return web.json_response({"success": False, "message": "key is required"}, status=400)
+        _storage_set(key, data.get("data"))
+        return web.json_response({"success": True})
+
+    @routes.post("/WM_prompt/physton_prompt/set_datas")
+    async def prompt_studio_set_datas(request):
+        payload = await request.json()
+        data = payload.get("datas") if isinstance(payload, dict) and isinstance(payload.get("datas"), dict) else payload
+        if not isinstance(data, dict):
+            return web.json_response({"success": False, "message": "data must be a dict"}, status=400)
+        for key, value in data.items():
+            _storage_set(key, value)
+        return web.json_response({"success": True})
+    @routes.get("/WM_prompt/physton_prompt/get_data_list_item")
+    async def prompt_studio_get_data_list_item(request):
+        key = str(request.query.get("key", "")).strip()
+        try:
+            index = int(request.query.get("index", "0"))
+        except Exception:
+            index = 0
+        return web.json_response({"item": _storage_list_get(key, index)})
+
+    @routes.post("/WM_prompt/physton_prompt/push_data_list")
+    async def prompt_studio_push_data_list(request):
+        data = await request.json()
+        key = str(data.get("key", "")).strip()
+        if not key:
+            return web.json_response({"success": False, "message": "key is required"}, status=400)
+        _storage_list_push(key, data.get("item"))
+        return web.json_response({"success": True})
+
+    @routes.post("/WM_prompt/physton_prompt/pop_data_list")
+    async def prompt_studio_pop_data_list(request):
+        data = await request.json()
+        key = str(data.get("key", "")).strip()
+        if not key:
+            return web.json_response({"success": False, "message": "key is required"}, status=400)
+        return web.json_response({"success": True, "item": _storage_list_pop(key)})
+
+    @routes.post("/WM_prompt/physton_prompt/shift_data_list")
+    async def prompt_studio_shift_data_list(request):
+        data = await request.json()
+        key = str(data.get("key", "")).strip()
+        if not key:
+            return web.json_response({"success": False, "message": "key is required"}, status=400)
+        return web.json_response({"success": True, "item": _storage_list_shift(key)})
+
+    @routes.post("/WM_prompt/physton_prompt/remove_data_list")
+    async def prompt_studio_remove_data_list(request):
+        data = await request.json()
+        key = str(data.get("key", "")).strip()
+        if not key:
+            return web.json_response({"success": False, "message": "key is required"}, status=400)
+        try:
+            index = int(data.get("index", 0))
+        except Exception:
+            index = 0
+        _storage_list_remove(key, index)
+        return web.json_response({"success": True})
+
+    @routes.post("/WM_prompt/physton_prompt/clear_data_list")
+    async def prompt_studio_clear_data_list(request):
+        data = await request.json()
+        key = str(data.get("key", "")).strip()
+        if not key:
+            return web.json_response({"success": False, "message": "key is required"}, status=400)
+        _storage_list_clear(key)
+        return web.json_response({"success": True})
+
+    @routes.get("/WM_prompt/physton_prompt/get_histories")
+    async def prompt_studio_get_histories(request):
+        type_name = str(request.query.get("type", "txt2img")).strip()
+        return web.json_response({"histories": history.get_histories(type_name)})
+
+    @routes.get("/WM_prompt/physton_prompt/get_favorites")
+    async def prompt_studio_get_favorites(request):
+        type_name = str(request.query.get("type", "txt2img")).strip()
+        return web.json_response({"favorites": history.get_favorites(type_name)})
+
+    @routes.post("/WM_prompt/physton_prompt/push_history")
+    async def prompt_studio_push_history(request):
+        data = await request.json()
+        type_name = str(data.get("type", "")).strip()
+        if not type_name:
+            return web.json_response({"success": False, "message": "type is required"}, status=400)
+        item = history.push_history(type_name, data.get("tags"), data.get("prompt"), data.get("name", ""))
+        return web.json_response({"success": True, "item": item})
+
+    @routes.post("/WM_prompt/physton_prompt/push_favorite")
+    async def prompt_studio_push_favorite(request):
+        data = await request.json()
+        type_name = str(data.get("type", "")).strip()
+        if not type_name:
+            return web.json_response({"success": False, "message": "type is required"}, status=400)
+        item = history.push_favorite(type_name, data.get("tags"), data.get("prompt"), data.get("name", ""))
+        return web.json_response({"success": True, "item": item})
+
+    @routes.post("/WM_prompt/physton_prompt/move_up_favorite")
+    async def prompt_studio_move_up_favorite(request):
+        data = await request.json()
+        return web.json_response({"success": history.move_up_favorite(str(data.get("type", "")).strip(), str(data.get("id", "")).strip())})
+
+    @routes.post("/WM_prompt/physton_prompt/move_down_favorite")
+    async def prompt_studio_move_down_favorite(request):
+        data = await request.json()
+        return web.json_response({"success": history.move_down_favorite(str(data.get("type", "")).strip(), str(data.get("id", "")).strip())})
+
+    @routes.get("/WM_prompt/physton_prompt/get_latest_history")
+    async def prompt_studio_get_latest_history(request):
+        type_name = str(request.query.get("type", "txt2img")).strip()
+        return web.json_response({"history": history.get_latest_history(type_name)})
+
+    @routes.post("/WM_prompt/physton_prompt/set_history")
+    async def prompt_studio_set_history(request):
+        data = await request.json()
+        return web.json_response({
+            "success": history.set_history(
+                str(data.get("type", "")).strip(),
+                str(data.get("id", "")).strip(),
+                data.get("tags"),
+                data.get("prompt"),
+                data.get("name", ""),
+            )
+        })
+
+    @routes.post("/WM_prompt/physton_prompt/set_history_name")
+    async def prompt_studio_set_history_name(request):
+        data = await request.json()
+        return web.json_response({"success": history.set_history_name(str(data.get("type", "")).strip(), str(data.get("id", "")).strip(), data.get("name", ""))})
+
+    @routes.post("/WM_prompt/physton_prompt/set_favorite_name")
+    async def prompt_studio_set_favorite_name(request):
+        data = await request.json()
+        return web.json_response({"success": history.set_favorite_name(str(data.get("type", "")).strip(), str(data.get("id", "")).strip(), data.get("name", ""))})
+
+    @routes.post("/WM_prompt/physton_prompt/dofavorite")
+    async def prompt_studio_dofavorite(request):
+        data = await request.json()
+        return web.json_response({"success": history.dofavorite(str(data.get("type", "")).strip(), str(data.get("id", "")).strip())})
+
+    @routes.post("/WM_prompt/physton_prompt/unfavorite")
+    async def prompt_studio_unfavorite(request):
+        data = await request.json()
+        return web.json_response({"success": history.unfavorite(str(data.get("type", "")).strip(), str(data.get("id", "")).strip())})
+
+    @routes.post("/WM_prompt/physton_prompt/delete_history")
+    async def prompt_studio_delete_history(request):
+        data = await request.json()
+        return web.json_response({"success": history.remove_history(str(data.get("type", "")).strip(), str(data.get("id", "")).strip())})
+
+    @routes.post("/WM_prompt/physton_prompt/delete_histories")
+    async def prompt_studio_delete_histories(request):
+        data = await request.json()
+        return web.json_response({"success": history.remove_histories(str(data.get("type", "")).strip())})
+
+    @routes.get("/WM_prompt/physton_prompt/get_group_tags")
+    async def prompt_studio_get_group_tags(request):
+        return web.json_response({"tags": _load_group_tags(_guess_lang(request))})
+
+    @routes.post("/WM_prompt/physton_prompt/add_group_tags")
+    async def prompt_studio_add_group_tags(request):
+        data = await _request_json_dict(request)
+        try:
+            yaml, path, tags = _load_editable_group_tags(_guess_lang(request))
+            group = _find_group(tags, str(data.get("key", "")))
+            subgroup = _find_subgroup(group, str(data.get("group", "")))
+            if subgroup is None:
+                return _group_tag_response(False, error="group_not_found")
+            subgroup.setdefault("tags", {})[str(data.get("en", ""))] = str(data.get("cn", ""))
+            _save_editable_group_tags(yaml, path, tags)
+            return _group_tag_response()
+        except Exception as e:
+            return _group_tag_response(False, error=str(e))
+
+    @routes.post("/WM_prompt/physton_prompt/edit_group_tags")
+    async def prompt_studio_edit_group_tags(request):
+        data = await _request_json_dict(request)
+        try:
+            yaml, path, tags = _load_editable_group_tags(_guess_lang(request))
+            group = _find_group(tags, str(data.get("key", "")))
+            subgroup = _find_subgroup(group, str(data.get("group", "")))
+            if subgroup is None:
+                return _group_tag_response(False, error="group_not_found")
+            subgroup.setdefault("tags", {})[str(data.get("en", ""))] = str(data.get("cn", ""))
+            _save_editable_group_tags(yaml, path, tags)
+            return _group_tag_response()
+        except Exception as e:
+            return _group_tag_response(False, error=str(e))
+
+    @routes.post("/WM_prompt/physton_prompt/delete_group_tags")
+    async def prompt_studio_delete_group_tags(request):
+        data = await _request_json_dict(request)
+        try:
+            yaml, path, tags = _load_editable_group_tags(_guess_lang(request))
+            group = _find_group(tags, str(data.get("key", "")))
+            subgroup = _find_subgroup(group, str(data.get("group", "")))
+            if subgroup is None:
+                return _group_tag_response(False, error="group_not_found")
+            subgroup.setdefault("tags", {}).pop(str(data.get("en", "")), None)
+            _save_editable_group_tags(yaml, path, tags)
+            return _group_tag_response()
+        except Exception as e:
+            return _group_tag_response(False, error=str(e))
+
+    @routes.post("/WM_prompt/physton_prompt/new_node_group_tags")
+    async def prompt_studio_new_node_group_tags(request):
+        data = await _request_json_dict(request)
+        try:
+            yaml, path, tags = _load_editable_group_tags(_guess_lang(request))
+            key = str(data.get("key", "")).strip()
+            subgroup_name = str(data.get("group", "")).strip()
+            if not key or not subgroup_name:
+                return _group_tag_response(False, error="empty_group_name")
+            if _find_group(tags, key) is None:
+                tags.append({
+                    "name": key,
+                    "groups": [{
+                        "name": subgroup_name,
+                        "color": str(data.get("color", "")),
+                        "tags": {},
+                    }],
+                })
+            _save_editable_group_tags(yaml, path, tags)
+            return _group_tag_response()
+        except Exception as e:
+            return _group_tag_response(False, error=str(e))
+
+    @routes.post("/WM_prompt/physton_prompt/new_group_tags")
+    async def prompt_studio_new_group_tags(request):
+        data = await _request_json_dict(request)
+        try:
+            yaml, path, tags = _load_editable_group_tags(_guess_lang(request))
+            group = _find_group(tags, str(data.get("key", "")))
+            subgroup_name = str(data.get("group", "")).strip()
+            if group is None:
+                return _group_tag_response(False, error="group_not_found")
+            if not subgroup_name:
+                return _group_tag_response(False, error="empty_group_name")
+            if _find_subgroup(group, subgroup_name) is None:
+                group.setdefault("groups", []).append({
+                    "name": subgroup_name,
+                    "color": str(data.get("color", "")),
+                    "tags": {},
+                })
+            _save_editable_group_tags(yaml, path, tags)
+            return _group_tag_response()
+        except Exception as e:
+            return _group_tag_response(False, error=str(e))
+
+    @routes.post("/WM_prompt/physton_prompt/edit_node_group_tags")
+    async def prompt_studio_edit_node_group_tags(request):
+        data = await _request_json_dict(request)
+        try:
+            yaml, path, tags = _load_editable_group_tags(_guess_lang(request))
+            group = _find_group(tags, str(data.get("key", "")))
+            new_name = str(data.get("group", "")).strip()
+            if group is None:
+                return _group_tag_response(False, error="group_not_found")
+            if not new_name:
+                return _group_tag_response(False, error="empty_group_name")
+            group["name"] = new_name
+            _save_editable_group_tags(yaml, path, tags)
+            return _group_tag_response()
+        except Exception as e:
+            return _group_tag_response(False, error=str(e))
+
+    @routes.post("/WM_prompt/physton_prompt/edit_child_group_tags")
+    async def prompt_studio_edit_child_group_tags(request):
+        data = await _request_json_dict(request)
+        try:
+            yaml, path, tags = _load_editable_group_tags(_guess_lang(request))
+            group = _find_group(tags, str(data.get("key", "")))
+            subgroup = _find_subgroup(group, str(data.get("group", "")))
+            new_name = str(data.get("newgroup", "")).strip()
+            if subgroup is None:
+                return _group_tag_response(False, error="group_not_found")
+            if not new_name:
+                return _group_tag_response(False, error="empty_group_name")
+            subgroup["name"] = new_name
+            _save_editable_group_tags(yaml, path, tags)
+            return _group_tag_response()
+        except Exception as e:
+            return _group_tag_response(False, error=str(e))
+
+    @routes.post("/WM_prompt/physton_prompt/delete_node_group_tags")
+    async def prompt_studio_delete_node_group_tags(request):
+        data = await _request_json_dict(request)
+        try:
+            yaml, path, tags = _load_editable_group_tags(_guess_lang(request))
+            key = str(data.get("key", ""))
+            tags[:] = [group for group in tags if not (isinstance(group, dict) and group.get("name") == key)]
+            _save_editable_group_tags(yaml, path, tags)
+            return _group_tag_response()
+        except Exception as e:
+            return _group_tag_response(False, error=str(e))
+
+    @routes.post("/WM_prompt/physton_prompt/delete_child_group_tags")
+    async def prompt_studio_delete_child_group_tags(request):
+        data = await _request_json_dict(request)
+        try:
+            yaml, path, tags = _load_editable_group_tags(_guess_lang(request))
+            group = _find_group(tags, str(data.get("key", "")))
+            if group is None:
+                return _group_tag_response(False, error="group_not_found")
+            subgroup_name = str(data.get("group", ""))
+            group["groups"] = [
+                subgroup for subgroup in group.setdefault("groups", [])
+                if not (isinstance(subgroup, dict) and subgroup.get("name") == subgroup_name)
+            ]
+            _save_editable_group_tags(yaml, path, tags)
+            return _group_tag_response()
+        except Exception as e:
+            return _group_tag_response(False, error=str(e))
+
+    @routes.get("/WM_prompt/physton_prompt/get_csvs")
+    async def prompt_studio_get_csvs(request):
+        return web.json_response({"csvs": _list_csvs()})
+
+    @routes.get("/WM_prompt/physton_prompt/get_csv")
+    async def prompt_studio_get_csv(request):
+        path = _resolve_csv_path(str(request.query.get("key", "")).strip())
+        if path is None or not path.exists():
+            raise web.HTTPNotFound()
+        return web.FileResponse(path)
+
+    @routes.get("/WM_prompt/physton_prompt/get_extra_networks")
+    async def prompt_studio_get_extra_networks(request):
+        return web.Response(status=200, text=_extra_networks_response_text(), content_type="application/json")
+
+    ROUTES_REGISTERED = True
+
+
+
+

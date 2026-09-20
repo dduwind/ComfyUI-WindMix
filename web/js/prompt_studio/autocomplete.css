@@ -1,0 +1,77 @@
+/* 主页面（非 iframe）自动补全下拉 —— 预设文本节点用的就是这一套。
+   主题适配依据（真机 comfyui_frontend_package 的 main-*.css）：
+     :root（浅色）      --fg-color:#000  --bg-color:#fff    --border-color:#4e4e4e
+     html.dark-theme    --fg-color:#fff  --bg-color:#202020
+   ⚠ 不要用 --comfy-menu-bg(#353535) / --comfy-input-bg(#222) —— 这两套主题下都是深色，
+     配上浅色主题的 --fg-color(#000) 就是黑底黑字。
+   深色主题类挂在 document.documentElement（<html>）上。 */
+.prompt-studio-autocomplete {
+    position: static;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 100%;
+    max-height: 220px;
+    overflow: auto;
+    padding: 8px;
+    border: 1px solid var(--border-color, #4e4e4e);
+    border-radius: 10px;
+    background: var(--bg-color, #202020);
+    color: var(--fg-color, #e6e6e6);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.18);
+}
+
+html.dark-theme .prompt-studio-autocomplete {
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.prompt-studio-autocomplete-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    line-height: 1.2;
+}
+
+/* 选中/悬停底色：WindMix 紫（原上游是琥珀 rgba(255,184,0,.22)，与插件主色不搭）。
+   浅色主题用低饱和淡紫压在浅底上，深色主题提亮一档，两套主题下都能看清文字。 */
+.prompt-studio-autocomplete-item:hover,
+.prompt-studio-autocomplete-item--selected {
+    background: rgba(83, 74, 183, 0.14);
+}
+
+html.dark-theme .prompt-studio-autocomplete-item:hover,
+html.dark-theme .prompt-studio-autocomplete-item--selected {
+    background: rgba(155, 138, 245, 0.24);
+}
+
+/* 命中前缀的着色：与选中底色同族紫（浅色 #534AB7 / 深色 #9b8af5） */
+.prompt-studio-autocomplete-highlight {
+    color: #534AB7;
+    font-weight: 600;
+}
+
+html.dark-theme .prompt-studio-autocomplete-highlight {
+    color: #9b8af5;
+}
+
+/* 右侧中文提示胶囊：淡紫底，与选中态同族 */
+.prompt-studio-autocomplete-pill {
+    margin-left: auto;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: rgba(83, 74, 183, 0.12);
+    font-size: 11px;
+}
+
+html.dark-theme .prompt-studio-autocomplete-pill {
+    background: rgba(155, 138, 245, 0.16);
+}
+
+.prompt-studio-autocomplete-item-info {
+    color: inherit;
+    text-decoration: none;
+}

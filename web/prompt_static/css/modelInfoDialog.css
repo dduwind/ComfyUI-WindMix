@@ -1,0 +1,136 @@
+.autocom-model-info {
+	color: white;
+	font-family: sans-serif;
+	max-width: 90vw;
+}
+
+.autocom-model-content {
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}
+
+.autocom-model-info h2 {
+	text-align: center;
+	margin: 0 0 10px 0;
+}
+
+.autocom-model-info p {
+	margin: 5px 0;
+}
+
+.autocom-model-info a {
+	color: dodgerblue;
+}
+
+.autocom-model-info a:hover {
+	text-decoration: underline;
+}
+
+.autocom-model-tags-list {
+	display: flex;
+	flex-wrap: wrap;
+	list-style: none;
+	gap: 10px;
+	max-height: 200px;
+	overflow: auto;
+	margin: 10px 0;
+	padding: 0;
+}
+
+.autocom-model-tag {
+	background-color: rgb(128, 213, 247);
+	color: #000;
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	border-radius: 5px;
+	padding: 2px 5px;
+	cursor: pointer;
+}
+
+.autocom-model-tag--selected span::before {
+	content: "✅";
+	position: absolute;
+	background-color: dodgerblue;
+	left: 0;
+	top: 0;
+	right: 0;
+	bottom: 0;
+	text-align: center;
+}
+
+.autocom-model-tag:hover {
+	outline: 2px solid dodgerblue;
+}
+
+.autocom-model-tag p {
+	margin: 0;
+}
+
+.autocom-model-tag span {
+	text-align: center;
+	border-radius: 5px;
+	background-color: dodgerblue;
+	color: #fff;
+	padding: 2px;
+	position: relative;
+	min-width: 20px;
+	overflow: hidden;
+}
+
+.autocom-model-metadata .comfy-modal-content {
+	max-width: 100%;
+}
+
+.autocom-model-metadata label {
+	margin-right: 1ch;
+	color: #ccc;
+}
+
+.autocom-model-metadata span {
+	color: dodgerblue;
+}
+
+.autocom-preview {
+	max-width: 50%;
+	margin-left: 10px;
+	position: relative;
+}
+
+.autocom-preview img {
+	max-height: 300px;
+}
+
+.autocom-preview button {
+	position: absolute;
+	font-size: 12px;
+	bottom: 10px;
+	right: 10px;
+}
+
+.autocom-preview button+button {
+	bottom: 34px;
+}
+
+.autocom-preview button.autocom-preview-nav {
+	bottom: unset;
+	right: 30px;
+	top: 10px;
+	font-size: 14px;
+	line-height: 14px;
+}
+
+.autocom-preview button.autocom-preview-nav+.autocom-preview-nav {
+	right: 10px;
+}
+
+.autocom-model-notes {
+	background-color: rgba(0, 0, 0, 0.25);
+	padding: 5px;
+	margin-top: 5px;
+}
+
+.autocom-model-notes:empty {
+	display: none;
+}

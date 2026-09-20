@@ -1,0 +1,74 @@
+/* WindMix：这两个变量原本是 A1111/ComfyUI 主题提供的，Prompt Studio 的 iframe 文档里
+   并没有定义它们（否则下拉会变成透明底 + 继承色）。这里补兜底色，同时给 JS 用的
+   --windmix-ac-bg / --windmix-ac-fg 提供取值。 */
+.autocom-autocomplete {
+	--windmix-ac-fg: var(--descrip-text, #d8d8dc);
+	--windmix-ac-bg: var(--comfy-menu-bg, #2b2b2f);
+	color: var(--windmix-ac-fg);
+	background-color: var(--windmix-ac-bg);
+	position: absolute;
+	font-family: sans-serif;
+	box-shadow: 3px 3px 8px rgba(0, 0, 0, 0.4);
+	overflow: auto;
+	z-index: calc(100 * 100 * 100 * 91);
+}
+
+.autocom-autocomplete-item {
+	cursor: pointer;
+	padding: 3px 7px;
+	display: flex;
+	border-left: 3px solid transparent;
+	align-items: center;
+}
+
+/* 选中/悬停：WindMix 紫（原上游是 dodgerblue）。iframe 内是固定深色 UI，用深色档紫。 */
+.autocom-autocomplete-item:hover {
+	background: rgba(155, 138, 245, 0.14);
+}
+
+.autocom-autocomplete-item--selected {
+	background: rgba(155, 138, 245, 0.24);
+	border-left-color: #9b8af5;
+}
+
+.autocom-autocomplete-highlight {
+	font-weight: bold;
+	text-decoration: underline;
+	text-decoration-color: #9b8af5;
+}
+
+.autocom-autocomplete-pill {
+	margin-left: auto;
+	font-size: 10px;
+	color: #fff;
+	padding: 2px 4px 2px 14px;
+	position: relative;
+}
+
+.autocom-autocomplete-pill::after {
+	content: "";
+	display: block;
+	background: rgba(255, 255, 255, 0.25);
+	width: calc(100% - 10px);
+	height: 100%;
+	position: absolute;
+	left: 10px;
+	top: 0;
+	border-radius: 5px;
+}
+
+.autocom-autocomplete-pill+.autocom-autocomplete-pill {
+	margin-left: 0;
+}
+
+.autocom-autocomplete-item-info {
+	margin-left: auto;
+	transition: filter 0.2s;
+	will-change: filter;
+	text-decoration: none;
+	padding-left: 10px;
+}
+
+.autocom-autocomplete-item-info:hover {
+	filter: invert(1);
+}

@@ -1,0 +1,79 @@
+# ---------------------------------------------------------------------------
+# ComfyUI-WindMix
+# ---------------------------------------------------------------------------
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Editors / OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local backups — keep these OUTSIDE the plugin folder, never inside
+*.bak
+*.bak_*
+*_bak_*
+*.orig
+*.tmp
+backup/
+backup_*/
+*副本*
+
+# Runtime state written by ComfyUI.
+# These folders are auto-recreated on first launch
+# (see prompt_studio/api.py::_ensure_dirs), so they never belong in git.
+prompt_studio/storage/prompt_data/
+prompt_studio/storage/notes/
+
+# ---------------------------------------------------------------------------
+# Personal data — MUST NOT be published.
+#
+# group_tags/custom.yaml : auto-copied from <lang>.yaml on first edit
+#                          (api.py::_ensure_custom_group_tags_file). Holds your
+#                          own tag edits.
+# group_tags/prepend.yaml: hand-written extras, merged IN FRONT of the main
+#                          list. Read-only in code — you created it.
+# group_tags/append.yaml : same mechanism, merged AFTER the main list.
+#                          (Nothing is written if absent — safe to ignore.)
+# presets/preset_text.json : your saved presets. Auto-recreated empty by
+#                          api.py::_wm_read_presets when missing.
+# presets/images/        : images you attached to presets.
+#
+# The shipped tag libraries (zh_CN.yaml, default.yaml, de_DE.yaml, ...) ARE
+# published — new users need them, so they are deliberately NOT listed here.
+# ---------------------------------------------------------------------------
+prompt_studio/storage/group_tags/custom.yaml
+prompt_studio/storage/group_tags/prepend.yaml
+prompt_studio/storage/group_tags/append.yaml
+presets/preset_text.json
+presets/images/
+
+# ---------------------------------------------------------------------------
+# wildcards/ — the tag libraries themselves are personal and stay local.
+#
+# The FOLDER must survive the clone: Wind_WildcardConcat_Dynamic.py resolves
+# its default path from <repo>/wildcards, and while a missing dir does not
+# crash anything, the node UI would point at a path that isn't there.
+# So: ignore every file inside, then explicitly re-include the README that
+# documents the expected format.
+# ---------------------------------------------------------------------------
+wildcards/*
+!wildcards/README.md
+
+# 6 组 emoji 词库随插件分发（作者自建，已确认可公开）
+!wildcards/🏞️ 场景.txt
+!wildcards/👗人物服装.txt
+!wildcards/💇 发型.txt
+!wildcards/🖼️ 构图.txt
+!wildcards/😊 面部表情.txt
+!wildcards/🧘 肢体动作.txt
