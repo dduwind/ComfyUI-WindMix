@@ -12,6 +12,8 @@
 
 面向 Anima / Z-Image / Krea-2 的 XY 测试工作流，用于批量测试 **LoRA** 与 **diffusion_models** 的不同组合。XY 结果可直接接入 `🧩 图像对比`，多张结果并排展示，效果差异一眼就能看出。
 
+`📊 XY 输入: LoRA2` 每一行 LoRA 都带一个 **tag 输入框**：选中 LoRA 时**自动填入触发词**，读的是 **LoRA Manager 的 metadata** —— 即 LoRA Manager 为每个 LoRA 生成的同名 `<LoRA名>.metadata.json`（取其 `civitai.trainedWords`），本插件不联网、只读这份文件。出图时该 tag **自动拼进正向提示词**，换轴对比不用再手工改提示词，每格都自带对应 LoRA 的触发词。
+
 ### 3. 预设文本管理器 —— 提示词复用 + 批量出图
 
 把平时收集的提示词存成预设，随取随用；配合 `🧩 Prompt Groups` 可将一份预设文本拆成多组，**一条工作流批量出图**。
