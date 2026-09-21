@@ -212,7 +212,7 @@ ComfyUI-WindMix/
 │   └── storage/                   # 词库（进库）+ 运行时数据（已 gitignore）
 ├── presets/                       # 预设管理器数据
 ├── wildcards/                     # 通配符词库
-├── Font/                          # Fancy Timer 用的 Square One 字体
+├── Font/                          # Fancy Timer / 计时胶囊用的 DS-Digital 字体
 └── example_workflows/             # 示例工作流
 ```
 

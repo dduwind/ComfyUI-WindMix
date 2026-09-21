@@ -10,6 +10,19 @@ let eventsBound = false;
 // but NOT the top-level Font/ folder. We instead fetch the font from the
 // /windmix/font/<file> route exposed by Fancy_Timer_Node.py (which reads
 // <plugin>/Font/<file>) and embed it via @font-face as a data: URL.
+//
+// The loader is shared (see window.__wmFancyTimer.ensureFont) so other WindMix
+// front-end modules — e.g. web/windmix_timer_widget.js — can guarantee the font
+// without racing this module's own setup().
+let _fontPromise = null;
+
+// DS-Digital Bold: a vector 7-segment face — crisp at any size, unlike the
+// pixel-based font it replaces. The file is already bold, so every rule that
+// uses it must NOT ask for font-weight: bold, or the browser synthesises a
+// second helping of weight and the strokes smear.
+const FONT_FILE = "DS-Digital-Bold.ttf";
+const FONT_FAMILY = "DS-Digital";
+
 async function _loadFontAsDataURL(url) {
     try {
         const r = await fetch(url);
@@ -36,12 +49,21 @@ const GlobalTimer = {
     isRunning: false,
     activeNodes: new Set(),
 
+    // mm:ss:cc — 8 glyphs. Two fractional digits (centiseconds) keep the
+    // readout visibly ticking, which is the whole point of the node; a third
+    // digit is unreadable at any refresh rate and only widens the string.
+    // Both this node and web/windmix_timer_widget.js render this same format.
     formatTime(ms) {
         if (ms < 0) ms = 0;
         const minutes     = String(Math.floor(ms / 60000)).padStart(2, '0');
         const seconds     = String(Math.floor((ms % 60000) / 1000)).padStart(2, '0');
-        const milliseconds = String(ms % 1000).padStart(3, '0');
-        return { str: `${minutes}:${seconds}:${milliseconds}`, minutes, seconds, milliseconds };
+        const centiseconds = String(Math.floor((ms % 1000) / 10)).padStart(2, '0');
+        return {
+            str: `${minutes}:${seconds}:${centiseconds}`,
+            minutes,
+            seconds,
+            centiseconds,
+        };
     },
 
     setDisplay(node, time) {
@@ -49,7 +71,7 @@ const GlobalTimer = {
         if (node._segMin) {
             node._segMin.textContent = time.minutes;
             node._segSec.textContent = time.seconds;
-            node._segMs.textContent  = time.milliseconds;
+            node._segMs.textContent  = time.centiseconds;
         } else {
             node.timerDisplay.textContent = time.str;
         }
@@ -91,6 +113,49 @@ const GlobalTimer = {
     unregisterNode(node) { this.activeNodes.delete(node); },
 };
 
+// Inject the @font-face for "DS-Digital" by base64-embedding the .ttf served
+// from our /windmix/font/ route (single reliable source). Idempotent and
+// concurrency-safe: repeated callers share the same in-flight promise.
+function ensureFancyTimerFont() {
+    if (_fontPromise) return _fontPromise;
+    _fontPromise = (async () => {
+        if (document.getElementById(FONT_ID)) return true;
+        const candidates = [
+            "/windmix/font/" + encodeURIComponent(FONT_FILE),
+        ];
+        let dataUrl = null;
+        for (const url of candidates) {
+            dataUrl = await _loadFontAsDataURL(url);
+            if (dataUrl) break;
+        }
+        if (!dataUrl) {
+            console.warn(`[WindMix fancy-timer] could not load ${FONT_FILE}; falling back to system monospace`);
+            return false;
+        }
+        const fontStyle = document.createElement("style");
+        fontStyle.id = FONT_ID;
+        fontStyle.innerText = `
+            @font-face {
+                font-family: "${FONT_FAMILY}";
+                src: url("${dataUrl}") format("truetype");
+                font-weight: normal;
+                font-style: normal;
+            }
+        `;
+        document.head.appendChild(fontStyle);
+        return true;
+    })();
+    return _fontPromise;
+}
+
+// Shared surface for other WindMix front-end modules. Assigned at module-eval
+// time so consumers that run later (e.g. another extension's setup()) see it.
+window.__wmFancyTimer = {
+    GlobalTimer,
+    formatTime: (ms) => GlobalTimer.formatTime(ms),
+    ensureFont: ensureFancyTimerFont,
+};
+
 // --- ComfyUI Extension Definition ---
 const FancyTimerNodeExtension = {
     name: "WindMix.FancyTimerNode",
@@ -110,8 +175,17 @@ const FancyTimerNodeExtension = {
                 this.properties = this.properties || {};
                 this.size = [420, 130];
 
+                // Black body, painted by us. Reason: the Vue renderer (Nodes 2.0)
+                // ignores node.bgcolor, so the node body stayed transparent and
+                // the light canvas grey showed through — purple #7300ff landed at
+                // only ~2.2:1 contrast, below the 3:1 large-text floor. The
+                // display container coincides exactly with the widget rect
+                // (verified in the live front-end), so filling it black restores
+                // the intended instrument-panel look. Corners stay square: the
+                // real node body has a 0px radius, so rounding here would only
+                // punch grey notches into the bottom edge.
                 const container = document.createElement("div");
-                container.style.cssText = `width: 100%; height: 100%; position: relative; --text-color: #7300ff;`;
+                container.style.cssText = `width: 100%; height: 100%; position: relative; background: #000000; --text-color: #7300ff;`;
 
                 this.timerDisplay = document.createElement("div");
                 this.timerDisplay.className = "fancy-timer-display";
@@ -131,10 +205,10 @@ const FancyTimerNodeExtension = {
                 this._segMs.className = "fancy-timer-seg fancy-timer-seg-ms";
                 this.timerDisplay.append(this._segMin, _col1, this._segSec, _col2, this._segMs);
 
-                const saved = (this.properties.elapsed_time_str || "00:00:000").split(":");
+                const saved = (this.properties.elapsed_time_str || "00:00:00").split(":");
                 this._segMin.textContent = saved[0] || "00";
                 this._segSec.textContent = saved[1] || "00";
-                this._segMs.textContent  = saved[2] || "000";
+                this._segMs.textContent  = saved[2] || "00";
 
                 container.appendChild(this.timerDisplay);
                 this.addDOMWidget("fancyTimer", "Fancy Timer", container, { serialize: false });
@@ -155,63 +229,41 @@ const FancyTimerNodeExtension = {
                 originalOnConfigure?.apply(this, arguments);
                 this.properties = info.properties || {};
                 if (this._segMin) {
-                    const parts = (this.properties.elapsed_time_str || "00:00:000").split(":");
+                    const parts = (this.properties.elapsed_time_str || "00:00:00").split(":");
                     this._segMin.textContent = parts[0] || "00";
                     this._segSec.textContent = parts[1] || "00";
-                    this._segMs.textContent  = parts[2] || "000";
+                    this._segMs.textContent  = parts[2] || "00";
                 }
             };
         }
     },
 
     async setup() {
-        // Inject the @font-face for "Square One" by base64-embedding the .ttf
-        // served from our /windmix/font/ route (single reliable source).
-        if (!document.getElementById(FONT_ID)) {
-            const candidates = [
-                "/windmix/font/" + encodeURIComponent("Square One.ttf"),
-            ];
-            let dataUrl = null;
-            for (const url of candidates) {
-                dataUrl = await _loadFontAsDataURL(url);
-                if (dataUrl) break;
-            }
-            if (dataUrl) {
-                const fontStyle = document.createElement("style");
-                fontStyle.id = FONT_ID;
-                fontStyle.innerText = `
-                    @font-face {
-                        font-family: "Square One";
-                        src: url("${dataUrl}") format("truetype");
-                        font-weight: normal;
-                        font-style: normal;
-                    }
-                `;
-                document.head.appendChild(fontStyle);
-            } else {
-                console.warn("[WindMix fancy-timer] could not load Square One.ttf; falling back to system monospace");
-            }
-        }
+        // Shared, idempotent font bootstrap (windmix_timer_widget.js uses the
+        // same promise, so the two extensions never duplicate @font-face rules).
+        await ensureFancyTimerFont();
 
         if (!document.getElementById(STYLE_ID)) {
             const style = document.createElement("style");
             style.id = STYLE_ID;
             // Color-only effects: a gentle green "glow-pulse" while running,
             // default purple when stopped. No text-shadow (per request).
+            // DS-Digital Bold is a single-weight face, so no font-weight: bold
+            // anywhere — requesting it would make the browser fake-embolden the
+            // glyphs and erode the segment gaps that make the face readable.
             style.innerText = `
                 .fancy-timer-display {
                     text-align: center; width: 100%; height: 100%; position: absolute;
                     top: 0; left: 0; background: transparent; border: none;
                     color: var(--text-color);
-                    font-family: "Square One", 'Courier New', 'Consolas', 'Monaco', monospace;
+                    font-family: "${FONT_FAMILY}", 'Courier New', 'Consolas', 'Monaco', monospace;
                     box-sizing: border-box; outline: none; margin: 0;
                     overflow: hidden; display: flex; justify-content: center;
-                    align-items: center; font-size: 50px;
+                    align-items: center; font-size: 64px;
                     transition: color 0.5s ease-in-out;
                     font-variant-numeric: tabular-nums;
                     letter-spacing: 0;
                     white-space: nowrap;
-                    font-weight: bold;
                 }
                 /* Pulsing green glow while the timer is running (no shadow). */
                 .fancy-timer-display.fancy-timer-running {
@@ -226,8 +278,11 @@ const FancyTimerNodeExtension = {
                     width: 2ch;
                     text-align: center;
                 }
+                /* Centiseconds: same 2-digit reservation as the other segments.
+                   Was 3ch back when the node carried milliseconds. */
                 .fancy-timer-seg-ms {
-                    width: 3ch;
+                    width: 2ch;
+                    opacity: 0.85;
                 }
                 .fancy-timer-sep {
                     display: inline-block;
