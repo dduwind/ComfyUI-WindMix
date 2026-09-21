@@ -13,14 +13,21 @@
 
 ## 一、安装
 
-### 方式 A：git clone
+### 方式 A：ComfyUI-Manager（推荐）
+
+1. 打开 ComfyUI → 右侧 **Manager** → **Custom Nodes Manager**
+2. 在搜索框粘贴 `https://github.com/dduwind/ComfyUI-WindMix`，点 **Install**
+   （或从菜单选 **Install via Git URL**，填入同一地址）
+3. 重启 ComfyUI
+
+### 方式 B：git clone
 
 ```bash
 cd ComfyUI/custom_nodes
 git clone https://github.com/dduwind/ComfyUI-WindMix.git
 ```
 
-### 方式 B：下载压缩包
+### 方式 C：下载压缩包
 
 从 Releases 或 Code → Download ZIP 下载后，解压到：
 

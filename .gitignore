@@ -2,6 +2,10 @@
 # ComfyUI-WindMix
 # ---------------------------------------------------------------------------
 
+# Agent / local scratch workspace (audit scripts, test harness, temp files).
+# Never part of the shipped plugin — keep it out even by accident.
+.workbuddy/
+
 # Python
 __pycache__/
 *.py[cod]
