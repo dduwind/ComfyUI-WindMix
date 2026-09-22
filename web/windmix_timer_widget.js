@@ -47,11 +47,19 @@ const SIZES = {
 };
 const SIZE_LABELS = [["s", "小"], ["m", "中"], ["l", "大"]];
 
-const HISTORY_MAX = 20;
+const HISTORY_MAX = 10;
 const LIST_VISIBLE = 6;
 const ROW_H = 22;
 const DRAG_THRESHOLD = 5;
 const GAP = 8;
+
+/* Per-node breakdown budget. A real workflow runs 30+ nodes, but almost all of
+   them are sub-second plumbing — listing them buries the two or three nodes that
+   actually cost time. So we keep only the heavy ones, worst first, and fold the
+   remainder into a single "其余 N 个节点 · 共 X.Xs" line so the run still adds up. */
+const NODE_MIN_MS = 1000; // 短于此的节点不进明细
+const NODE_MAX_ROWS = 6; // 每次运行最多留几条
+const NODE_ROW_H = 24; // 明细一行的高度，用于撑开列表
 
 /* --------------------------------------------------------------- storage */
 
@@ -82,6 +90,7 @@ const state = {
   history: Array.isArray(lsGet(LS.history, [])) ? lsGet(LS.history, []) : [],
   lastMs: Number(lsGet(LS.last, 0)) || 0,
   panelOpen: false,
+  expanded: null, // t of the expanded run entry — one at a time, null = collapsed
 };
 
 /* ----------------------------------------------------------------- clock */
@@ -97,6 +106,7 @@ const Clock = {
 
   start() {
     if (this.running) return;
+    NodeMeter.reset();
     this.running = true;
     this.startedAt = Date.now();
     startTick();
@@ -109,7 +119,7 @@ const Clock = {
     this.running = false;
     state.lastMs = elapsed;
     lsSet(LS.last, elapsed);
-    pushHistory(elapsed);
+    pushHistory(elapsed, NodeMeter.take());
     stopTick();
     render();
     if (state.panelOpen) renderPanel();
@@ -120,16 +130,105 @@ const Clock = {
   },
 };
 
-function pushHistory(ms) {
-  state.history.unshift({ t: Date.now(), ms });
+function pushHistory(ms, detail) {
+  const entry = { t: Date.now(), ms };
+  if (detail && detail.nodes.length) {
+    entry.nodes = detail.nodes;
+    entry.restN = detail.restN;
+    entry.restMs = detail.restMs;
+  }
+  state.history.unshift(entry);
   if (state.history.length > HISTORY_MAX) state.history.length = HISTORY_MAX;
+  // the expanded run may have just been trimmed off the tail
+  if (state.expanded !== null && !state.history.some((e) => e.t === state.expanded)) {
+    state.expanded = null;
+  }
   lsSet(LS.history, state.history);
 }
 
 function clearHistory() {
   state.history = [];
+  state.expanded = null;
   lsSet(LS.history, []);
   renderPanel();
+}
+
+/* ------------------------------------------------------------ node meter */
+
+/**
+ * Stopwatch for individual nodes. ComfyUI announces a node with `executing` but
+ * never says how long it ran — the payload is only node/display_node/prompt_id,
+ * sent straight through send_sync rather than add_message, so it carries no
+ * timestamp either. The executor does run exactly one node at a time, though, so
+ * the gap between two consecutive `executing` events *is* the previous node's
+ * wall time. That is what we diff here.
+ *
+ * Cached nodes never emit `executing`, so they're absent for free — correct, as
+ * they cost nothing.
+ */
+const NodeMeter = {
+  buffer: [],
+  pending: null,
+
+  reset() {
+    this.buffer = [];
+    this.pending = null;
+  },
+
+  /** A node just started: bank the previous one, then start timing this one. */
+  begin(id) {
+    const now = Date.now();
+    this.close(now);
+    this.pending = { id, t0: now };
+  },
+
+  /** Bank the running node, if any. Idempotent — several end signals race. */
+  close(now = Date.now()) {
+    const p = this.pending;
+    if (!p) return;
+    this.pending = null;
+    const ms = now - p.t0;
+    if (ms > 0) this.buffer.push({ id: p.id, ms });
+  },
+
+  /** End of run: keep the worst offenders, fold the rest into a summary line. */
+  take() {
+    this.close();
+    const all = this.buffer.sort((a, b) => b.ms - a.ms);
+    this.buffer = [];
+    this.pending = null;
+
+    const shown = all.filter((n) => n.ms >= NODE_MIN_MS).slice(0, NODE_MAX_ROWS);
+    const shownSet = new Set(shown);
+    const rest = all.filter((n) => !shownSet.has(n));
+
+    return {
+      nodes: shown.map((n) => ({ title: nodeTitle(n.id), ms: n.ms })),
+      restN: rest.length,
+      restMs: rest.reduce((a, b) => a + b.ms, 0),
+    };
+  },
+};
+
+function nodeTitle(id) {
+  const fallback = `#${id}`;
+  try {
+    const g = app && app.graph;
+    if (!g) return fallback;
+    let n = typeof g.getNodeById === "function" ? g.getNodeById(id) : null;
+    if (!n && Array.isArray(g._nodes)) {
+      n = g._nodes.find((x) => String(x.id) === String(id)) || null;
+    }
+    if (!n) return fallback;
+    return String(n.title || n.type || fallback);
+  } catch {
+    return fallback;
+  }
+}
+
+/** "42.8s" — the breakdown wants one decimal, not the mm:ss readout shape. */
+function fmtSec(ms) {
+  return `${(Number(ms) / 1000).toFixed(1)}s`;
 }
 
 /* ------------------------------------------------------------ formatting */
@@ -436,14 +535,93 @@ function renderPanel() {
     row.append(el("span", "wm-p-time", wallClock(Date.now())), el("span", "wm-p-dur", fmt(Clock.elapsed()).short));
     box.appendChild(row);
   }
+
+  let detailH = 0;
   list.forEach((item, i) => {
-    const row = el("div", `wm-p-row${!Clock.running && i === 0 ? " wm-p-row-now" : ""}`);
-    row.append(el("span", "wm-p-time", wallClock(item.t)), el("span", "wm-p-dur", fmt(item.ms).short));
+    const nodes = Array.isArray(item.nodes) ? item.nodes : [];
+    const open = nodes.length > 0 && state.expanded === item.t;
+
+    const row = el(
+      "div",
+      `wm-p-row${!Clock.running && i === 0 ? " wm-p-row-now" : ""}${nodes.length ? " wm-p-row-x" : ""}${open ? " wm-p-open" : ""}`
+    );
+    const time = el("span", "wm-p-time");
+    if (nodes.length) time.appendChild(chevron(open));
+    time.appendChild(el("span", "wm-p-clock", wallClock(item.t)));
+    row.append(time, el("span", "wm-p-dur", fmt(item.ms).short));
+
+    if (nodes.length) {
+      row.addEventListener("click", () => toggleExpand(item.t));
+      row.title = open ? "收起节点耗时" : "展开节点耗时";
+    }
     box.appendChild(row);
+
+    if (open) {
+      const detail = buildDetail(item, nodes);
+      box.appendChild(detail);
+      detailH = detail.offsetHeight;
+    }
   });
+
+  // An open breakdown needs room. The list grows by exactly that much and keeps
+  // scrolling past it, so the panel never turns into a full-height sheet.
+  box.style.maxHeight = `${LIST_VISIBLE * ROW_H + detailH}px`;
 
   panel._q("empty").style.display = list.length || Clock.running ? "none" : "block";
   box.style.display = list.length || Clock.running ? "block" : "none";
+}
+
+/** Caret for the expandable rows. The size is explicit because an inline SVG
+    with no intrinsic dimensions falls back to the UA's ~300px default. */
+function chevron(open) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("width", "7");
+  svg.setAttribute("height", "11");
+  svg.setAttribute("viewBox", "0 0 7 11");
+  svg.setAttribute("class", `wm-p-caret${open ? " wm-p-caret-open" : ""}`);
+
+  const path = document.createElementNS(NS, "path");
+  path.setAttribute("d", "M1 1 L6 5.5 L1 10");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.6");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(path);
+  return svg;
+}
+
+/** Node breakdown: worst first, bar length proportional to the top node. */
+function buildDetail(item, nodes) {
+  const box = el("div", "wm-p-detail");
+  const max = Math.max(...nodes.map((n) => n.ms), 1);
+
+  nodes.forEach((n) => {
+    const line = el("div", "wm-p-node");
+    const head = el("div", "wm-p-node-h");
+    head.append(el("span", "wm-p-node-t", n.title), el("span", "wm-p-node-ms", fmtSec(n.ms)));
+
+    const track = el("div", "wm-p-bar");
+    const fill = el("div", "wm-p-bar-f");
+    fill.style.width = `${Math.max(2, Math.round((n.ms / max) * 100))}%`;
+    track.appendChild(fill);
+
+    line.append(head, track);
+    box.appendChild(line);
+  });
+
+  if (item.restN > 0) {
+    box.appendChild(el("div", "wm-p-rest", `其余 ${item.restN} 个节点 · 共 ${fmtSec(item.restMs)}`));
+  }
+  return box;
+}
+
+function toggleExpand(t) {
+  state.expanded = state.expanded === t ? null : t;
+  renderPanel();
+  positionPanel();
+  requestAnimationFrame(positionPanel);
 }
 
 function positionPanel() {
@@ -717,6 +895,35 @@ function bindGlobal() {
     },
     true
   );
+}
+
+/**
+ * Feed NodeMeter straight from the api events. This runs alongside whichever
+ * Clock source is active: the `execution_start` / `executing` listeners inside
+ * hookTimer() are the fallback path only (it returns early once the Fancy Timer
+ * module is present), and node timing must not depend on that.
+ */
+function bindNodeMeter() {
+  api.addEventListener("execution_start", () => NodeMeter.reset());
+
+  api.addEventListener("executing", ({ detail }) => {
+    // The frontend collapses this message before dispatching it — api.js runs
+    // dispatchCustomEvent("executing", data.display_node || data.node), so what
+    // arrives is a bare node id, not the {node, display_node, prompt_id} object
+    // the backend sent. Subgraph inner nodes therefore arrive already resolved
+    // to their outer display node.
+    if (detail === null || detail === undefined) {
+      NodeMeter.close(); // {"node": None} — the end-of-run sentinel from main.py
+      return;
+    }
+    NodeMeter.begin(detail);
+  });
+
+  // `executed` is NOT usable as an end marker: execution.py emits it only when
+  // the node produced UI output, so an ordinary node never sends it.
+  api.addEventListener("execution_success", () => NodeMeter.close());
+  api.addEventListener("execution_error", () => NodeMeter.close());
+  api.addEventListener("execution_interrupted", () => NodeMeter.close());
 }
 
 /**
@@ -998,6 +1205,61 @@ function ensureStyle() {
   color: #e8e8ee;
 }
 #${ID_PANEL} .wm-p-row-now .wm-p-dur { color: #4ade80; }
+/* ---------- node breakdown ---------- */
+#${ID_PANEL} .wm-p-row-x { cursor: pointer; }
+#${ID_PANEL} .wm-p-time { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+#${ID_PANEL} .wm-p-clock { white-space: nowrap; }
+#${ID_PANEL} .wm-p-caret {
+  flex: 0 0 auto;
+  color: rgba(255, 255, 255, .38);
+  transition: transform .15s ease;
+}
+#${ID_PANEL} .wm-p-caret-open { transform: rotate(90deg); }
+#${ID_PANEL} .wm-p-row-x:hover .wm-p-caret { color: rgba(255, 255, 255, .72); }
+#${ID_PANEL} .wm-p-open {
+  background: rgba(255, 255, 255, .06);
+  border-left-color: rgba(167, 139, 250, .55);
+}
+/* The breakdown deliberately inherits the panel font: node titles are Chinese
+   as often as not, and DS-Digital ships no CJK glyphs. Only .wm-p-dur — the
+   run readouts on the rows themselves — stays 7-segment. */
+#${ID_PANEL} .wm-p-detail { padding: 4px 8px 7px 10px; margin-bottom: 2px; }
+#${ID_PANEL} .wm-p-node { margin-bottom: 5px; }
+#${ID_PANEL} .wm-p-node-h {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, .72);
+}
+#${ID_PANEL} .wm-p-node-t {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#${ID_PANEL} .wm-p-node-ms {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, .5);
+}
+#${ID_PANEL} .wm-p-bar {
+  height: 3px;
+  margin-top: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, .09);
+}
+#${ID_PANEL} .wm-p-bar-f {
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(167, 139, 250, .85);
+}
+#${ID_PANEL} .wm-p-rest {
+  font-size: 11px;
+  color: rgba(255, 255, 255, .34);
+  padding-top: 1px;
+}
 #${ID_PANEL} .wm-p-empty {
   padding: 14px 4px;
   text-align: center;
@@ -1114,6 +1376,7 @@ app.registerExtension({
     applyPlacement();
     render();
     bindGlobal();
+    bindNodeMeter();
     hookTimer();
 
     // Vue re-renders the top bar regularly; re-attach if our node was dropped
