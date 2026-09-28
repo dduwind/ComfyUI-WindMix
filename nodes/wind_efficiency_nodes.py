@@ -2497,6 +2497,15 @@ class Wind_DiTEfficientLoader:
             "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
             "vae_name": "qwen_image_vae.safetensors",
         },
+        # Qwen-Image 2.1: 16x/64ch latent (latent_formats.QwenImage21). Text encoder is
+        # Qwen3-VL-8B — still loaded via clip_type "qwen_image"; comfy detects the 2.1
+        # path from the te tensors (sd.py: TEModel.QWEN3VL_8B + CLIPType.QWEN_IMAGE).
+        # Defaults use the official Comfy-Org/Qwen-Image-2.1 repack filenames.
+        "Qwen-Image 2.1": {
+            "clip_type": "qwen_image",
+            "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+            "vae_name": "qwen_image_2.1_vae_bf16.safetensors",
+        },
         "Generic DiT": {
             "clip_type": "flux",
             "clip_name": None,
@@ -2580,6 +2589,13 @@ class Wind_DiTEfficientLoader:
         if vae_name == "Auto":
             vae_name = family_cfg["vae_name"] if family_cfg["vae_name"] is not None else "None"
 
+        # Clear error when an Auto-resolved family default is missing on disk (e.g. the
+        # Qwen-Image 2.1 files are not downloaded yet), instead of a cryptic crash in comfy.
+        if clip_name is not None and folder_paths.get_full_path("text_encoders", clip_name) is None:
+            raise RuntimeError(f"[WindMix] DiT 加载器: text encoder 文件不存在: {clip_name} (model_family={model_family})，请先下载或手动选择")
+        if vae_name not in (None, "None") and folder_paths.get_full_path("vae", vae_name) is None:
+            raise RuntimeError(f"[WindMix] DiT 加载器: VAE 文件不存在: {vae_name} (model_family={model_family})，请先下载或手动选择")
+
         # Empty latent
         latent = torch.zeros([batch_size, 4, height // 8, width // 8]).cpu()
 
@@ -2588,6 +2604,20 @@ class Wind_DiTEfficientLoader:
         # 1) Diffusion model (unet)
         unet_path = folder_paths.get_full_path("diffusion_models", unet_name)
         model = comfy.sd.load_diffusion_model(unet_path, model_options={})
+
+        # Conservative latent rule: 8x-native families (SD/SDXL/Flux/Anima/Z-Image/Krea-2)
+        # keep the legacy [B, 4, h//8, w//8] tensor above, byte-for-byte unchanged. Only
+        # models whose native latent format is NOT 8x (Qwen-Image 2.1 = 16x/64ch,
+        # HunyuanImage 2.1 = 32x/64ch) get the latent rebuilt from their real ratio and
+        # channel count — otherwise their VAE decodes at the true ratio and the output
+        # comes out (ratio/8)x too large.
+        _lf = getattr(getattr(model, "model", None), "latent_format", None)
+        _dsr = int(getattr(_lf, "spacial_downscale_ratio", 8) or 8)
+        if _dsr != 8:
+            _ch = int(getattr(_lf, "latent_channels", 4) or 4)
+            latent = torch.zeros([batch_size, _ch, max(1, height // _dsr), max(1, width // _dsr)]).cpu()
+            print(f"[WindMix] DiT loader: non-8x latent format ({_dsr}x/{_ch}ch) -> "
+                  f"{width}x{height}px => latent {width // _dsr}x{height // _dsr}")
 
         # 2) Flow-matching sampling schedule
         # shift=0 means "trust the model's own sampling config" (same as ComfyUI's native Load Diffusion Model).

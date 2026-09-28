@@ -407,6 +407,12 @@ export class TextAreaAutoComplete {
 	static lorasEnabled = false;
 	static suggestionCount = 20;
 
+	/** 词库被外部异步填充（iframe 场景）后调用，按引用重建键缓存。 */
+	static refreshWordsCache(words) {
+		if (!TextAreaAutoComplete._keyCacheMap) TextAreaAutoComplete._keyCacheMap = new WeakMap();
+		TextAreaAutoComplete._keyCacheMap.set(words, Object.keys(words));
+	}
+
 	/** @type {Record<string, Record<string, AutoCompleteEntry>>} */
 	static groups = {};
 	/** @type {Set<string>} */
@@ -560,31 +566,47 @@ export class TextAreaAutoComplete {
 	}
 
 	#getFilteredWords(term) {
-		term = term.toLocaleLowerCase();
+		term = term.toLowerCase();
 
 		const priorityMatches = [];
 		const prefixMatches = [];
 		const includesMatches = [];
-		for (const word of Object.keys(this.words)) {
-			const lowerWord = word.toLocaleLowerCase();
+
+		// 键列表缓存：按词库对象引用缓存（WeakMap），构建一次后所有按键复用，
+		// 避免每次按键都重新分配一个 ~2.4 万长度的数组。
+		// iframe 异步填充词库后由 refreshWordsCache() 重建对应条目。
+		const words = this.words;
+		if (!TextAreaAutoComplete._keyCacheMap) TextAreaAutoComplete._keyCacheMap = new WeakMap();
+		let keys = TextAreaAutoComplete._keyCacheMap.get(words);
+		if (!keys) {
+			keys = Object.keys(words);
+			TextAreaAutoComplete._keyCacheMap.set(words, keys);
+		}
+		const SUGGEST = TextAreaAutoComplete.suggestionCount;
+
+		for (let i = 0; i < keys.length; i++) {
+			const word = keys[i];
+			const wordInfo = words[word];
+			// 小写结果懒缓存到 wordInfo 上：加载/首次访问时算一次，之后所有按键复用，
+			// 避免每次按键对 2.4 万词反复调用 toLocaleLowerCase。
+			const lowerWord = wordInfo._lower != null ? wordInfo._lower : (wordInfo._lower = word.toLowerCase());
 			if (lowerWord === term) {
 				// Dont include exact matches
 				continue;
 			}
 
 			const pos = lowerWord.indexOf(term);
-			if (pos === -1) {
-				// No match
-				continue;
-			}
+			if (pos === -1) continue; // 无匹配
 
-			const wordInfo = this.words[word];
 			if (wordInfo.priority) {
 				priorityMatches.push({ pos, wordInfo });
 			} else if (pos) {
 				includesMatches.push({ pos, wordInfo });
 			} else {
 				prefixMatches.push({ pos, wordInfo });
+				// 前缀命中按热度（词库序）排在最前，已凑满一屏候选即可提前结束扫描，
+				// 省掉后面几万词的 includes 扫描（slice 后也会丢弃）。
+				if (prefixMatches.length >= SUGGEST) break;
 			}
 		}
 
@@ -599,7 +621,7 @@ export class TextAreaAutoComplete {
 		return priorityMatches
 			.slice(0, top)
 			.concat(prefixMatches, priorityMatches.slice(top), includesMatches)
-			.slice(0, TextAreaAutoComplete.suggestionCount);
+			.slice(0, SUGGEST);
 	}
 
 	#update() {
@@ -616,6 +638,13 @@ export class TextAreaAutoComplete {
 				before = null;
 			}
 		}
+
+		// 去重：同一内容片段的重复触发（如 keypress 后紧接 keyup）直接跳过扫描，
+		// 砍掉约一半的无谓全量遍历。下拉已显示且片段未变时无需重算。
+		if (before === this._lastTerm && this.dropdown.parentElement) {
+			return;
+		}
+		this._lastTerm = before;
 
 		if (!before) {
 			this.#hide();
@@ -843,7 +872,11 @@ export function attachAutocompleteToIframe(iframe) {
 	// 词库对象先建好并马上传给实例，加载完成后原地填充 → 不阻塞弹窗打开
 	const words = {};
 	wmLoadWords().then((loaded) => {
-		if (loaded && Object.keys(loaded).length) Object.assign(words, loaded);
+		if (loaded && Object.keys(loaded).length) {
+			Object.assign(words, loaded);
+			// 词库异步填充完成 → 重建键缓存（WeakMap 按引用缓存，此处失效并重建）
+			TextAreaAutoComplete.refreshWordsCache(words);
+		}
 	});
 
 	let tries = 0;
