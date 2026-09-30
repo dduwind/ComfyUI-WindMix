@@ -2533,14 +2533,28 @@ class Wind_DiTEfficientLoader:
     @classmethod
     def INPUT_TYPES(cls):
         clip_type_options = ["Auto"] + [t.name.lower() for t in comfy.sd.CLIPType]
+        # Family default filenames stay in the combo lists even when the files are not
+        # downloaded yet: the frontend family auto-switch needs to be able to SELECT
+        # them (server-side combo validation requires the value to be in the list),
+        # and the runtime guard below raises a clear Chinese error if they are missing.
+        _clips_on_disk = folder_paths.get_filename_list("text_encoders")
+        _vaes_on_disk = folder_paths.get_filename_list("vae")
+        _fam_clips = [v["clip_name"] for v in cls.FAMILY_CONFIG.values() if v.get("clip_name")]
+        _fam_vaes = [v["vae_name"] for v in cls.FAMILY_CONFIG.values() if v.get("vae_name")]
+        _clip_list = list(dict.fromkeys(["Auto"] + _fam_clips + _clips_on_disk))
+        _vae_list = list(dict.fromkeys(["Auto", "None"] + _fam_vaes + _vaes_on_disk))
         return {"required": {
-            "model_family": (list(cls.FAMILY_CONFIG.keys()), {"default": "Anima"}),
+            # family_config is passed through to the frontend so the JS auto-switch
+            # reads the SAME source of truth as the runtime resolution below (single
+            # config, no JS-side copy that can drift out of sync).
+            "model_family": (list(cls.FAMILY_CONFIG.keys()),
+                             {"default": "Anima", "family_config": cls.FAMILY_CONFIG}),
             "clip_type": (clip_type_options, {"default": "Auto",
                                               "tooltip": "Auto=按 model_family 自动选择；手动选择时覆盖自动配置（全部小写）"}),
             "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
-            "clip_name": (["Auto"] + folder_paths.get_filename_list("text_encoders"),
+            "clip_name": (_clip_list,
                           {"default": "Auto", "tooltip": "Auto=按 model_family 自动选择默认 text_encoder"}),
-            "vae_name": (["Auto", "None"] + folder_paths.get_filename_list("vae"),
+            "vae_name": (_vae_list,
                          {"default": "Auto", "tooltip": "Auto=按 model_family 自动选择默认 VAE；None=不使用 VAE"}),
             "shift": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.01,
                                  "tooltip": "Flow-matching shift。0=使用模型默认配置；>0 时强制覆盖模型推荐的 shift。"}),
@@ -2613,10 +2627,19 @@ class Wind_DiTEfficientLoader:
         # comes out (ratio/8)x too large.
         _lf = getattr(getattr(model, "model", None), "latent_format", None)
         _dsr = int(getattr(_lf, "spacial_downscale_ratio", 8) or 8)
+        _ch = int(getattr(_lf, "latent_channels", 4) or 4)
+        # Some comfy builds leave model.latent_format at the 8x default even for Qwen-Image 2.1,
+        # so the ratio above alone cannot be trusted. Detect the real architecture by the model
+        # class name and apply its known latent geometry as a fallback.
+        _mtype = type(getattr(model, "model", None)).__name__
+        _NON_8X_BY_TYPE = {"QwenImage21": (16, 64)}  # Qwen-Image 2.1: 16x downscale, 64 latent channels
+        if _dsr == 8 and _mtype in _NON_8X_BY_TYPE:
+            _dsr, _ch = _NON_8X_BY_TYPE[_mtype]
+            print(f"[WindMix] DiT loader: latent_format reported 8x but model type is {_mtype}; "
+                  f"overriding to {_dsr}x/{_ch}ch")
         if _dsr != 8:
-            _ch = int(getattr(_lf, "latent_channels", 4) or 4)
             latent = torch.zeros([batch_size, _ch, max(1, height // _dsr), max(1, width // _dsr)]).cpu()
-            print(f"[WindMix] DiT loader: non-8x latent format ({_dsr}x/{_ch}ch) -> "
+            print(f"[WindMix] DiT loader: non-8x latent ({_mtype} {_dsr}x/{_ch}ch) -> "
                   f"{width}x{height}px => latent {width // _dsr}x{height // _dsr}")
 
         # 2) Flow-matching sampling schedule

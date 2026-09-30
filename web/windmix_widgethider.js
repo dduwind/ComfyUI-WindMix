@@ -168,54 +168,44 @@ function recompute(node) {
 
 //==============================================================================
 // ⚡ DiT Efficient Loader: auto-switch clip_type/clip_name/vae_name
+// Single source of truth: FAMILY_CONFIG comes from Python via the model_family
+// widget's options (serialized in /object_info), so new families (e.g.
+// Qwen-Image 2.1) follow automatically with no JS-side copy to drift.
 //==============================================================================
 
-const DIT_FAMILY_CONFIG = {
-    "Anima": {
-        clip_type: "qwen_image",
-        clip_name: "qwen_3_06b_base.safetensors",
-        vae_name: "qwen_image_vae.safetensors",
-    },
-    "Z-Image": {
-        clip_type: "lumina2",
-        clip_name: "qwen_3_4b.safetensors",
-        vae_name: "Z-Image_clear_vae.safetensors",
-    },
-    "Krea-2": {
-        clip_type: "krea2",
-        clip_name: "qwen3vl_4b_fp8_scaled.safetensors",
-        vae_name: "qwen_image_vae.safetensors",
-    },
-    "Generic DiT": {
-        clip_type: "flux",
-        clip_name: "Auto",
-        vae_name: "Auto",
-    },
-};
+function getDiTFamilyConfig(node) {
+    const w = findWidgetByName(node, "model_family");
+    return w?.options?.family_config || null;
+}
 
 function setComboIfPresent(widget, value) {
-    if (!widget) return;
+    if (!widget || value === undefined || value === null) return;
     const opts = widget.options?.values;
-    if (!Array.isArray(opts) || !opts.includes(value)) return;
+    if (Array.isArray(opts) && !opts.includes(value)) return;
     widget.value = value;
     if (typeof widget.callback === "function") widget.callback(value);
 }
 
 function applyDiTFamilyConfig(node) {
     const family = findWidgetByName(node, "model_family")?.value;
-    const cfg = DIT_FAMILY_CONFIG[family];
+    const cfgMap = getDiTFamilyConfig(node);
+    const cfg = cfgMap ? cfgMap[family] : null;
     if (!cfg) return;
 
     setComboIfPresent(findWidgetByName(node, "clip_type"), cfg.clip_type);
-    setComboIfPresent(findWidgetByName(node, "clip_name"), cfg.clip_name);
-    setComboIfPresent(findWidgetByName(node, "vae_name"), cfg.vae_name);
+    // Python None means "no family default": fall back to Auto (loader resolves it).
+    setComboIfPresent(findWidgetByName(node, "clip_name"), cfg.clip_name ?? "Auto");
+    setComboIfPresent(findWidgetByName(node, "vae_name"), cfg.vae_name ?? "None");
     recompute(node);
 }
 
 function hookDiTFamily(node) {
     const familyWidget = findWidgetByName(node, "model_family");
-    if (!familyWidget || familyWidget._familyHooked) return;
-    familyWidget._familyHooked = true;
+    // Dedicated flag (not _familyHooked): a stale copy of this script may still be
+    // present on the deploy drive; even if it hooks first, this hook must also attach
+    // so the up-to-date config always wins as the last callback in the chain.
+    if (!familyWidget || familyWidget._wmFamilyHooked) return;
+    familyWidget._wmFamilyHooked = true;
 
     const origCallback = familyWidget.callback;
     familyWidget.callback = function (...args) {
@@ -228,9 +218,9 @@ function hookDiTFamily(node) {
     let attempts = 0;
     const tryApply = () => {
         applyDiTFamilyConfig(node);
-        const clipName = findWidgetByName(node, "clip_name");
-        const opts = clipName?.options?.values;
-        const targetName = DIT_FAMILY_CONFIG[familyWidget.value]?.clip_name;
+        const cfgMap = getDiTFamilyConfig(node);
+        const targetName = cfgMap?.[familyWidget.value]?.clip_name ?? "Auto";
+        const opts = findWidgetByName(node, "clip_name")?.options?.values;
         attempts++;
         if ((!Array.isArray(opts) || !opts.includes(targetName)) && attempts < 20) {
             setTimeout(tryApply, 100);
