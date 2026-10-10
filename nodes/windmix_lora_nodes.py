@@ -25,9 +25,13 @@ MAX_LORA_ROWS = 50
 
 
 def _parse_stack(lora_data: str):
-    """把 lora_data(JSON 字符串) 解析成统一的条目列表。
+    """把 lora_data(JSON 字符串) 解析成统一的条目列表（配方文件夹就地展开）。
 
-    兼容两种格式：纯数组 [{name,model,tag,on}]，或带 loras 字段的对象 {loras:[...]}。
+    兼容三种形态：
+      - 纯数组 [{name,model,tag,on}, ...]                    （旧格式，顶层 LoRA 行）
+      - 带文件夹的数组 [{folder,on,open,loras:[...]}, ...]   （配方，按显示顺序展开；
+        整组 on=false 时整组跳过）
+      - {loras:[...]} 包裹对象
     只保留有 name 的合法条目，强度非法时回退 1.0。
     """
     try:
@@ -40,24 +44,33 @@ def _parse_stack(lora_data: str):
         return []
 
     out = []
-    for e in data:
-        if not isinstance(e, dict):
-            continue
-        name = (e.get("name") or "").strip()
-        if not name:
-            continue
-        try:
-            model = float(e.get("model", 1.0))
-        except Exception:
-            model = 1.0
-        if model != model:  # NaN 保护
-            model = 1.0
-        out.append({
-            "name": name,
-            "model": model,
-            "tag": (e.get("tag") or "").strip(),
-            "on": bool(e.get("on", True)),
-        })
+
+    def walk(items):
+        for e in items:
+            if not isinstance(e, dict):
+                continue
+            if e.get("folder"):
+                if not e.get("on", True):
+                    continue
+                walk(e.get("loras") or [])
+                continue
+            name = (e.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                model = float(e.get("model", 1.0))
+            except Exception:
+                model = 1.0
+            if model != model:  # NaN 保护
+                model = 1.0
+            out.append({
+                "name": name,
+                "model": model,
+                "tag": (e.get("tag") or "").strip(),
+                "on": bool(e.get("on", True)),
+            })
+
+    walk(data)
     return out[:MAX_LORA_ROWS]
 
 

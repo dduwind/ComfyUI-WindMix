@@ -74,7 +74,7 @@ let _popToken = 0;
 function getPreviewPop() {
     if (!_previewPop || !_previewPop.isConnected) {
         _previewPop = document.createElement("div");
-        _previewPop.className = "wm-preview-pop";
+        _previewPop.className = "wm-xy-preview";
         _previewPop.style.display = "none";
         _previewPop.append(document.createElement("img"));
         document.body.append(_previewPop);
@@ -254,29 +254,29 @@ function openFolderModal(node, current, onApply) {
         if (backdrop) backdrop.remove();
         backdrop = document.createElement("div");
         backdrop.id = "wm_unet_folder_modal";
-        backdrop.className = "wm-folder-backdrop";
+        backdrop.className = "wm-xy-folder-backdrop";
         backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
 
         const dialog = document.createElement("div");
-        dialog.className = "wm-folder-dialog";
+        dialog.className = "wm-xy-folder-dialog";
 
         const header = document.createElement("div");
-        header.className = "wm-folder-header";
+        header.className = "wm-xy-folder-header";
         const title = document.createElement("div");
-        title.className = "wm-folder-title";
+        title.className = "wm-xy-folder-title";
         title.textContent = "选择模型文件夹";
         const closeBtn = document.createElement("div");
-        closeBtn.className = "wm-folder-close";
+        closeBtn.className = "wm-xy-folder-close";
         closeBtn.textContent = "✕";
         closeBtn.onclick = () => backdrop.remove();
         header.append(title, closeBtn);
 
         const toolbar = document.createElement("div");
-        toolbar.className = "wm-folder-toolbar";
+        toolbar.className = "wm-xy-folder-toolbar";
         const mkBtn = (label) => {
             const b = document.createElement("button");
             b.type = "button";
-            b.className = "wm-btn";
+            b.className = "wm-xy-btn";
             b.textContent = label;
             return b;
         };
@@ -287,20 +287,20 @@ function openFolderModal(node, current, onApply) {
         toolbar.append(selAll, selNone);
 
         const treeBox = document.createElement("div");
-        treeBox.className = "wm-folder-tree";
+        treeBox.className = "wm-xy-folder-tree";
 
         function renderTree() {
             treeBox.innerHTML = "";
             const renderNode = (n, depth) => {
                 const row = document.createElement("div");
-                row.className = "wm-folder-row";
+                row.className = "wm-xy-folder-row";
                 row.style.marginLeft = depth * 14 + "px";
                 const tri = document.createElement("span");
                 tri.textContent = n._open === false ? "▸" : "▾";
-                tri.className = "wm-folder-tri";
+                tri.className = "wm-xy-folder-tri";
                 const cb = document.createElement("input");
                 cb.type = "checkbox";
-                cb.className = "wm-folder-cb";
+                cb.className = "wm-xy-folder-cb";
                 cb.checked = selected.has(n.prefix);
                 cb.onchange = () => {
                     const desc = collectPrefixes(n, new Set());
@@ -309,10 +309,10 @@ function openFolderModal(node, current, onApply) {
                     renderTree();
                 };
                 const label = document.createElement("span");
-                label.className = "wm-folder-label";
+                label.className = "wm-xy-folder-label";
                 label.textContent = n.name;
                 const cnt = document.createElement("span");
-                cnt.className = "wm-folder-cnt";
+                cnt.className = "wm-xy-folder-cnt";
                 cnt.textContent = "(" + n.fileCount + ")";
                 tri.onclick = () => { n._open = n._open === false ? true : false; renderTree(); };
                 row.append(tri, cb, label, cnt);
@@ -326,13 +326,13 @@ function openFolderModal(node, current, onApply) {
         renderTree();
 
         const footer = document.createElement("div");
-        footer.className = "wm-folder-footer";
+        footer.className = "wm-xy-folder-footer";
         const cancel = mkBtn("取消");
         cancel.style.flex = "0 0 auto";
         cancel.style.padding = "6px 18px";
         cancel.onclick = () => backdrop.remove();
         const apply = mkBtn("应用");
-        apply.className = "wm-btn wm-btn-primary";
+        apply.className = "wm-xy-btn wm-xy-btn-primary";
         apply.onclick = () => {
             const allPrefixes = collectPrefixes(tree, new Set());
             // 丢根目录 ""，仅保留具体子目录。根目录与具体目录并存时，根目录会
@@ -372,43 +372,96 @@ function showChooser(node, onChoose, onCancel) {
         const models = itemsInFolders(all, set);
 
         const panel = document.createElement("div");
-        panel.className = "wm-chooser";
+        panel.className = "wm-xy-chooser";
 
         const header = document.createElement("div");
-        header.className = "wm-chooser-header";
+        header.className = "wm-xy-chooser-header";
         const t = document.createElement("span");
-        t.className = "wm-chooser-title";
+        t.className = "wm-xy-chooser-title";
         t.textContent = "选择模型";
         const x = document.createElement("span");
-        x.className = "wm-chooser-close";
+        x.className = "wm-xy-chooser-close";
         x.textContent = "✕";
         x.onclick = () => { closeChooser(); if (typeof onCancel === "function") onCancel(); };
         header.append(t, x);
         panel.append(header);
 
+        const body = document.createElement("div");
+        body.className = "wm-xy-chooser-body";
+        const side = document.createElement("div");
+        side.className = "wm-xy-chooser-side";
+        const main = document.createElement("div");
+        main.className = "wm-xy-chooser-main";
+
         const search = document.createElement("input");
-        search.className = "wm-chooser-search";
+        search.className = "wm-xy-chooser-search";
         search.placeholder = "搜索…";
-        panel.append(search);
 
         const list = document.createElement("div");
-        list.className = "wm-chooser-list";
-        panel.append(list);
+        list.className = "wm-xy-chooser-list";
+
+        // 文件夹侧栏（全部 + 各文件夹，含数量徽标）
+        let curDir = null; // null = 全部
+        const sideItems = [];
+        const dirLabel = (d) => {
+            if (!d) return "(根目录)";
+            const parts = String(d).replace(/\/$/, "").split("/");
+            return parts[parts.length - 1] || d;
+        };
+        const mkSide = (label, dir, count) => {
+            const it = document.createElement("div");
+            it.className = "wm-xy-chooser-side-item" + (dir === null ? " active" : "");
+            const lbl = document.createElement("span");
+            lbl.className = "lbl";
+            lbl.textContent = label;
+            const n = document.createElement("span");
+            n.className = "n";
+            n.textContent = count;
+            it.append(lbl, n);
+            it.title = dir === null ? "全部模型" : dir;
+            it.__dir = dir;
+            it.onclick = () => {
+                curDir = dir;
+                sideItems.forEach((s) => s.classList.toggle("active", s.__dir === dir));
+                render(search.value);
+            };
+            sideItems.push(it);
+            side.append(it);
+        };
+        mkSide("全部", null, models.length);
+        const dirs = new Map();
+        for (const path of models) {
+            const d = folderOf(path);
+            dirs.set(d, (dirs.get(d) || 0) + 1);
+        }
+        for (const [d, c] of [...dirs.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+            mkSide(dirLabel(d), d, c);
+        }
+
+        const foot = document.createElement("div");
+        foot.className = "wm-xy-chooser-foot";
+
+        main.append(search, list, foot);
+        body.append(side, main);
+        panel.append(body);
 
         const render = (q) => {
             list.innerHTML = "";
             const ql = (q || "").trim().toLowerCase();
-            const vis = ql ? models.filter((l) => l.toLowerCase().includes(ql)) : models;
+            let vis = curDir ? models.filter((p) => folderOf(p).startsWith(curDir)) : models.slice();
+            if (ql) vis = vis.filter((l) => l.toLowerCase().includes(ql));
+            foot.textContent = `共 ${vis.length} 个 · ${curDir === null ? "全部" : dirLabel(curDir)}`
+                + (set ? ` · 已按 ${set.size} 个文件夹筛选` : "");
             if (!vis.length) {
                 const empty = document.createElement("div");
-                empty.className = "wm-chooser-empty";
-                empty.textContent = set ? "所选文件夹内无模型" : "无模型";
+                empty.className = "wm-xy-chooser-empty";
+                empty.textContent = curDir !== null && !ql ? "该文件夹内无模型" : (set ? "所选文件夹内无模型" : "无模型");
                 list.append(empty);
                 return;
             }
             for (const path of vis) {
                 const item = document.createElement("div");
-                item.className = "wm-chooser-item";
+                item.className = "wm-xy-chooser-item";
                 item.textContent = basename(path);
                 item.title = path;
                 item.onclick = () => {
@@ -452,119 +505,164 @@ function injectStyle() {
     _styleInjected = true;
     const s = document.createElement("style");
     s.textContent = `
+/* ---- 主题令牌（与 LoRA 节点同一套 --wm-lo-* 双主题变量） ---- */
+.wm-xy-container, .wm-xy-chooser, .wm-xy-folder-dialog, .wm-xy-preview {
+  --wm-lo-brand: #534AB7;
+  --wm-lo-accent: #534AB7;
+  --wm-lo-panel: #f2f2f3;
+  --wm-lo-field: #ffffff;
+  --wm-lo-fg: #1f1f21;
+  --wm-lo-dim: #85858c;
+  --wm-lo-line: #d8d8dc;
+  --wm-lo-line2: #c6c6cd;
+  --wm-lo-danger: #c0392b;
+  --wm-lo-shadow: 0 8px 30px rgba(0,0,0,.18);
+}
+html.dark-theme .wm-xy-container, html.dark-theme .wm-xy-chooser,
+html.dark-theme .wm-xy-folder-dialog, html.dark-theme .wm-xy-preview {
+  --wm-lo-accent: #9b8af5;
+  --wm-lo-panel: #2a2a2a;
+  --wm-lo-field: #1e1e1e;
+  --wm-lo-fg: #e6e6e6;
+  --wm-lo-dim: #9a9a9a;
+  --wm-lo-line: #3a3a3a;
+  --wm-lo-line2: #454545;
+  --wm-lo-danger: #e57373;
+  --wm-lo-shadow: 0 8px 30px rgba(0,0,0,.5);
+}
+
 /* ---- WindMix UNet2 节点（与 LoRA 节点同源样式） ---- */
-.wm-lora-container { display:flex; flex-direction:column; gap:6px; padding-bottom:8px; }
+.wm-xy-container { display:flex; flex-direction:column; gap:6px; padding-bottom:8px; }
 
-.wm-folder-btn { width:100%; margin-bottom:2px; padding:8px 10px; text-align:center;
-  background:var(--comfy-input-bg, #2a2a2a); color:var(--fg-color, #eee);
-  border:1px solid var(--border-color, #444); border-radius:8px;
-  cursor:pointer; font-size:12px;
+.wm-xy-folderbtn { display:flex; align-items:center; gap:6px; width:100%; min-width:0; min-height:34px; line-height:1;
+  background:var(--wm-lo-field, #1e1e1e); color:var(--wm-lo-fg, #e6e6e6);
+  border:1px solid var(--border-color, #444); border-radius:8px; padding:7px 10px; box-sizing:border-box;
+  cursor:pointer; font-size:12px; margin-bottom:2px; text-align:left;
   transition:border-color .15s ease, background .15s ease; }
-.wm-folder-btn:hover { border-color:var(--comfy-primary, #534AB7); background:rgba(83,74,183,0.08); }
+.wm-xy-folderbtn:hover { border-color:var(--wm-lo-accent, #9b8af5); background:rgba(83,74,183,0.08); }
+.wm-xy-fb-ic { display:inline-flex; align-items:center; font-size:13px; line-height:1; }
+.wm-xy-fb-txt { line-height:1; }
+.wm-xy-fb-badge { margin-left:auto; background:var(--wm-lo-brand, #534AB7); color:#fff; border-radius:999px;
+  padding:1px 8px; font-size:11px; line-height:14px; font-weight:600; flex:none; }
+.wm-xy-fb-badge.off { background:var(--wm-lo-line2, #454545); color:var(--wm-lo-fg, #e6e6e6); font-weight:500; }
+.wm-xy-fb-chev { color:var(--wm-lo-dim, #9a9a9a); font-size:10px; flex:none; }
 
-.wm-lora-rows { display:flex; flex-direction:column; gap:2px; }
+.wm-xy-rows { display:flex; flex-direction:column; gap:2px; }
 
-.wm-lora-row { display:flex; align-items:stretch; gap:8px; padding:4px 6px; border-radius:8px;
+.wm-xy-row { display:flex; align-items:stretch; gap:8px; padding:4px 6px; border-radius:8px;
   transition:background .15s ease; }
-.wm-lora-row:hover { background:rgba(83,74,183,0.06); }
-.wm-lora-row .wm-on { width:15px; height:15px; flex:none; cursor:pointer; align-self:center;
-  accent-color:var(--comfy-primary, #534AB7); }
-.wm-lora-row .wm-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-  background:var(--comfy-input-bg, #2a2a2a); border:1px solid var(--border-color, #444); border-radius:6px;
-  padding:6px 8px; cursor:pointer; color:var(--fg-color, #eee); font-size:12px; box-sizing:border-box;
+.wm-xy-row:hover { background:rgba(83,74,183,0.06); }
+.wm-xy-row .wm-xy-on { width:15px; height:15px; flex:none; cursor:pointer; align-self:center;
+  accent-color:var(--wm-lo-accent, #9b8af5); }
+.wm-xy-row .wm-xy-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  background:var(--wm-lo-field, #1e1e1e); border:1px solid var(--border-color, #444); border-radius:6px;
+  padding:6px 8px; cursor:pointer; color:var(--wm-lo-fg, #e6e6e6); font-size:12px; box-sizing:border-box;
   transition:border-color .15s ease, background .15s ease; }
-.wm-lora-row .wm-name:hover { border-color:var(--comfy-primary, #534AB7); background:rgba(83,74,183,0.10); }
-.wm-lora-row .wm-name:focus-visible { outline:2px solid var(--comfy-primary, #534AB7); outline-offset:1px; }
-.wm-lora-row .wm-del { flex:none; cursor:pointer; color:#e57373; padding:3px 6px; border-radius:6px; font-size:12px;
-  border:2px solid var(--border-color, #444); background:var(--comfy-input-bg, #2a2a2a);
+.wm-xy-row .wm-xy-name:hover { border-color:var(--wm-lo-accent, #9b8af5); background:rgba(83,74,183,0.10); }
+.wm-xy-row .wm-xy-name:focus-visible { outline:2px solid var(--wm-lo-accent, #9b8af5); outline-offset:1px; }
+.wm-xy-row .wm-xy-del { flex:none; cursor:pointer; color:var(--wm-lo-danger, #e57373); padding:3px 6px; border-radius:6px; font-size:12px;
+  border:2px solid var(--border-color, #444); background:var(--wm-lo-field, #1e1e1e);
   display:inline-flex; align-items:center; justify-content:center; min-width:24px; line-height:1; font-weight:600; box-sizing:border-box;
   transition:background .15s ease, border-color .15s ease; }
-.wm-lora-row .wm-del:hover { background:rgba(229,115,115,0.15); border-color:#e57373; }
+.wm-xy-row .wm-xy-del:hover { background:rgba(229,115,115,0.15); border-color:var(--wm-lo-danger, #e57373); }
 
-.wm-lora-hint { color:var(--fg-color, #eee); opacity:0.55; font-size:12px; padding:8px 4px; font-style:italic; }
+.wm-xy-hint { color:var(--wm-lo-fg, #e6e6e6); opacity:0.55; font-size:12px; padding:8px 4px; font-style:italic; }
 
-.wm-lora-add { width:100%; margin-top:10px; margin-bottom:2px; padding:8px 0;
-  background:transparent; color:#9b8af5;
-  border:1px solid var(--comfy-primary, #534AB7); border-radius:8px;
+.wm-xy-add { width:100%; margin-top:10px; margin-bottom:2px; padding:8px 0;
+  background:transparent; color:var(--wm-lo-accent, #9b8af5);
+  border:1px solid var(--wm-lo-accent, #9b8af5); border-radius:8px;
   cursor:pointer; font-size:12px; font-weight:600;
   transition:background .15s ease, border-color .15s ease; }
-.wm-lora-add:hover { background:rgba(83,74,183,0.18); border-color:#9b8af5; }
-.wm-lora-add:active { background:rgba(83,74,183,0.28); }
+.wm-xy-add:hover { background:rgba(83,74,183,0.18); border-color:var(--wm-lo-accent, #9b8af5); }
+.wm-xy-add:active { background:rgba(83,74,183,0.28); }
 
 /* ---- 选模型弹窗 ---- */
-.wm-chooser { position:fixed; z-index:10001; width:480px; max-width:92vw; max-height:62vh; overflow:auto;
-  background:var(--comfy-menu-bg, #2a2a2a); color:var(--fg-color, #eee);
+.wm-xy-chooser { position:fixed; z-index:10001; width:620px; max-width:92vw; max-height:62vh; overflow:hidden;
+  background:var(--wm-lo-panel, #2a2a2a); color:var(--wm-lo-fg, #e6e6e6);
   border:1px solid var(--border-color, #444); border-radius:10px;
-  box-shadow:0 8px 30px rgba(0,0,0,0.5); font-family:sans-serif; font-size:12px; }
-.wm-chooser-header { display:flex; align-items:center; justify-content:space-between;
+  box-shadow:0 8px 30px rgba(0,0,0,0.5); font-family:sans-serif; font-size:12px;
+  display:flex; flex-direction:column; }
+.wm-xy-chooser-body { display:flex; flex:1; min-height:0; }
+.wm-xy-chooser-side { flex:0 0 168px; border-right:1px solid var(--border-color, #444);
+  overflow-y:auto; padding:6px; }
+.wm-xy-chooser-side-item { display:flex; align-items:center; gap:6px; padding:6px 8px;
+  border-radius:6px; cursor:pointer; font-size:12px; }
+.wm-xy-chooser-side-item:hover { background:rgba(83,74,183,0.10); }
+.wm-xy-chooser-side-item.active { background:rgba(83,74,183,0.22); }
+.wm-xy-chooser-side-item .lbl { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.wm-xy-chooser-side-item .n { flex:none; font-size:11px; opacity:0.65; }
+.wm-xy-chooser-main { flex:1; min-width:0; display:flex; flex-direction:column; }
+.wm-xy-chooser-foot { padding:6px 12px; border-top:1px solid var(--border-color, #444);
+  font-size:11px; opacity:0.65; }
+.wm-xy-chooser-header { display:flex; align-items:center; justify-content:space-between;
   padding:9px 12px; border-bottom:1px solid var(--border-color, #444); }
-.wm-chooser-title { font-size:13px; font-weight:500; }
-.wm-chooser-close { cursor:pointer; color:var(--fg-color, #eee); opacity:0.6; padding:2px 6px; border-radius:6px;
+.wm-xy-chooser-title { font-size:13px; font-weight:500; }
+.wm-xy-chooser-close { cursor:pointer; color:var(--wm-lo-fg, #e6e6e6); opacity:0.6; padding:2px 6px; border-radius:6px;
   transition:background .15s ease, opacity .15s ease; }
-.wm-chooser-close:hover { background:rgba(255,255,255,0.08); opacity:1; }
-.wm-chooser-search { width:calc(100% - 20px); margin:8px 10px; padding:6px 8px;
-  background:var(--comfy-input-bg, #2a2a2a); color:var(--fg-color, #eee);
+.wm-xy-chooser-close:hover { background:rgba(255,255,255,0.08); opacity:1; }
+.wm-xy-chooser-search { width:calc(100% - 20px); margin:8px 10px; padding:6px 8px;
+  background:var(--wm-lo-field, #1e1e1e); color:var(--wm-lo-fg, #e6e6e6);
   border:1px solid var(--border-color, #444); border-radius:6px; box-sizing:border-box;
   font-size:12px; transition:border-color .15s ease; }
-.wm-chooser-search:focus { outline:none; border-color:var(--comfy-primary, #534AB7); }
-.wm-chooser-list { padding-bottom:6px; }
-.wm-chooser-item { padding:7px 12px; cursor:pointer; border-bottom:1px solid var(--border-color, #444);
+.wm-xy-chooser-search:focus { outline:none; border-color:var(--wm-lo-accent, #9b8af5); }
+.wm-xy-chooser-list { flex:1; overflow-y:auto; padding-bottom:6px; }
+.wm-xy-chooser-item { padding:7px 12px; cursor:pointer; border-bottom:1px solid var(--border-color, #444);
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
   transition:background .12s ease, color .12s ease; }
-.wm-chooser-item:last-child { border-bottom:none; }
-.wm-chooser-item:hover { background:rgba(83,74,183,0.10); }
-.wm-chooser-empty { padding:12px; color:var(--fg-color, #eee); opacity:0.6; }
+.wm-xy-chooser-item:last-child { border-bottom:none; }
+.wm-xy-chooser-item:hover { background:rgba(83,74,183,0.10); }
+.wm-xy-chooser-empty { padding:12px; color:var(--wm-lo-fg, #e6e6e6); opacity:0.6; }
 
 /* ---- 文件夹树弹窗 ---- */
-.wm-folder-backdrop { position:fixed; left:0; top:0; width:100%; height:100%;
+.wm-xy-folder-backdrop { position:fixed; left:0; top:0; width:100%; height:100%;
   background:rgba(15,17,26,0.45); z-index:10000; display:flex; align-items:center; justify-content:center; }
-.wm-folder-dialog { background:var(--comfy-menu-bg, #2a2a2a); color:var(--fg-color, #eee);
+.wm-xy-folder-dialog { background:var(--wm-lo-panel, #2a2a2a); color:var(--wm-lo-fg, #e6e6e6);
   border-radius:12px; width:454px; max-width:92vw; max-height:86vh; display:flex; flex-direction:column;
   font-family:sans-serif; box-shadow:0 8px 30px rgba(0,0,0,0.5); overflow:hidden; }
-.wm-folder-header { display:flex; align-items:center; justify-content:space-between;
+.wm-xy-folder-header { display:flex; align-items:center; justify-content:space-between;
   padding:12px 16px; border-bottom:1px solid var(--border-color, #444); }
-.wm-folder-title { font-size:14px; font-weight:500; }
-.wm-folder-close { cursor:pointer; color:var(--fg-color, #eee); opacity:0.6; padding:2px 6px; border-radius:6px;
+.wm-xy-folder-title { font-size:14px; font-weight:500; }
+.wm-xy-folder-close { cursor:pointer; color:var(--wm-lo-fg, #e6e6e6); opacity:0.6; padding:2px 6px; border-radius:6px;
   transition:background .15s ease, opacity .15s ease; }
-.wm-folder-close:hover { background:rgba(255,255,255,0.08); opacity:1; }
-.wm-folder-toolbar { display:flex; gap:8px; padding:10px 16px; }
-.wm-folder-tree { padding:4px 16px; overflow-y:auto; max-height:60vh; }
-.wm-folder-row { display:flex; align-items:center; gap:6px; padding:4px 6px; border-radius:6px;
+.wm-xy-folder-close:hover { background:rgba(255,255,255,0.08); opacity:1; }
+.wm-xy-folder-toolbar { display:flex; gap:8px; padding:10px 16px; }
+.wm-xy-folder-tree { padding:4px 16px; overflow-y:auto; max-height:60vh; }
+.wm-xy-folder-row { display:flex; align-items:center; gap:6px; padding:4px 6px; border-radius:6px;
   transition:background .12s ease; }
-.wm-folder-row:hover { background:rgba(83,74,183,0.06); }
-.wm-folder-tri { cursor:pointer; color:var(--fg-color, #eee); opacity:0.55; width:10px; flex:none;
+.wm-xy-folder-row:hover { background:rgba(83,74,183,0.06); }
+.wm-xy-folder-tri { cursor:pointer; color:var(--wm-lo-fg, #e6e6e6); opacity:0.55; width:10px; flex:none;
   transition:opacity .12s ease; }
-.wm-folder-tri:hover { opacity:1; }
-.wm-folder-cb { accent-color:var(--comfy-primary, #534AB7); cursor:pointer; flex:none; }
-.wm-folder-label { font-size:12px; cursor:default; }
-.wm-folder-cnt { font-size:11px; color:var(--fg-color, #eee); opacity:0.55; }
-.wm-folder-footer { display:flex; gap:8px; padding:12px 16px; border-top:1px solid var(--border-color, #444);
+.wm-xy-folder-tri:hover { opacity:1; }
+.wm-xy-folder-cb { accent-color:var(--wm-lo-accent, #9b8af5); cursor:pointer; flex:none; }
+.wm-xy-folder-label { font-size:12px; cursor:default; }
+.wm-xy-folder-cnt { font-size:11px; color:var(--wm-lo-fg, #e6e6e6); opacity:0.55; }
+.wm-xy-folder-footer { display:flex; gap:8px; padding:12px 16px; border-top:1px solid var(--border-color, #444);
   justify-content:flex-end; }
 
 /* ---- 通用按钮（弹窗内） ---- */
-.wm-btn { flex:1; padding:6px 0; font-size:12px; cursor:pointer;
-  background:var(--comfy-input-bg, #2a2a2a); color:var(--fg-color, #eee);
+.wm-xy-btn { flex:1; padding:6px 0; font-size:12px; cursor:pointer;
+  background:var(--wm-lo-field, #1e1e1e); color:var(--wm-lo-fg, #e6e6e6);
   border:1px solid var(--border-color, #444); border-radius:6px;
   transition:border-color .15s ease, background .15s ease; font-family:sans-serif; }
-.wm-btn:hover { border-color:var(--comfy-primary, #534AB7); background:rgba(83,74,183,0.08); }
-.wm-btn-primary { flex:0 0 auto; padding:6px 18px; background:var(--comfy-primary, #534AB7); color:#fff;
-  border:1px solid var(--comfy-primary, #534AB7); }
-.wm-btn-primary:hover { background:#6358c4; border-color:#6358c4; }
+.wm-xy-btn:hover { border-color:var(--wm-lo-accent, #9b8af5); background:rgba(83,74,183,0.08); }
+.wm-xy-btn-primary { flex:0 0 auto; padding:6px 18px; background:var(--wm-lo-accent, #9b8af5); color:#fff;
+  border:1px solid var(--wm-lo-accent, #9b8af5); }
+.wm-xy-btn-primary:hover { background:#6358c4; border-color:#6358c4; }
 
 /* ---- 行拖动排序（⠿ 手柄） ---- */
-.wm-grip { flex:none; cursor:grab; color:var(--fg-color, #eee); opacity:.45; user-select:none;
+.wm-xy-grip { flex:none; cursor:grab; color:var(--wm-lo-fg, #e6e6e6); opacity:.45; user-select:none;
   display:inline-flex; align-items:center; align-self:center; padding:0 2px;
   transition:opacity .15s ease; }
-.wm-grip:hover { opacity:.95; }
-.wm-grip:active { cursor:grabbing; }
-.wm-lora-row.dragging { opacity:.35; }
-.wm-lora-row.drop-target { box-shadow:0 0 0 2px var(--comfy-primary, #534AB7) inset;
+.wm-xy-grip:hover { opacity:.95; }
+.wm-xy-grip:active { cursor:grabbing; }
+.wm-xy-row.dragging { opacity:.35; }
+.wm-xy-row.drop-target { box-shadow:0 0 0 2px var(--wm-lo-accent, #9b8af5) inset;
   background:rgba(83,74,183,0.12); border-radius:8px; }
 /* ---- 模型预览浮窗 ---- */
-.wm-preview-pop { position:fixed; z-index:100002; max-width:308px; padding:6px;
-  background:var(--comfy-menu-bg,#2a2a2a); border:1px solid var(--border-color,#555);
+.wm-xy-preview { position:fixed; z-index:100002; max-width:308px; padding:6px;
+  background:var(--wm-lo-panel, #2a2a2a); border:1px solid var(--border-color,#555);
   border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,.45); pointer-events:none; }
-.wm-preview-pop img { display:block; max-width:296px; max-height:56vh; border-radius:5px; object-fit:contain; }
+.wm-xy-preview img { display:block; max-width:296px; max-height:56vh; border-radius:5px; object-fit:contain; }
 `;
     document.head.append(s);
 }
@@ -603,7 +701,7 @@ const GRIP_SVG = `<svg width="10" height="16" viewBox="0 0 10 16" fill="currentC
 // grip 手柄可拖发起排序；拖拽数据带 node.id，drop 时校验，防跨节点串位
 function makeRowGrip(node, stack, i, row) {
     const grip = document.createElement("div");
-    grip.className = "wm-grip";
+    grip.className = "wm-xy-grip";
     grip.title = "拖动调整顺序";
     grip.innerHTML = GRIP_SVG;
     grip.draggable = true;
@@ -652,23 +750,23 @@ function renderRows(node) {
 
     if (!stack.length) {
         const hint = document.createElement("div");
-        hint.className = "wm-lora-hint";
+        hint.className = "wm-xy-hint";
         hint.textContent = "暂无模型，点击下方「+ Add 模型」添加";
         node.__rowsEl.append(hint);
     }
 
     stack.forEach((entry, i) => {
         const row = document.createElement("div");
-        row.className = "wm-lora-row";
+        row.className = "wm-xy-row";
 
         const on = document.createElement("input");
         on.type = "checkbox";
-        on.className = "wm-on";
+        on.className = "wm-xy-on";
         on.checked = !!entry.on;
         on.onchange = () => { entry.on = on.checked; syncData(node); };
 
         const name = document.createElement("div");
-        name.className = "wm-name";
+        name.className = "wm-xy-name";
         name.textContent = entry.name ? basename(entry.name) : "（点击选择模型）";
         name.title = entry.name || "点击选择模型";
         name.onclick = () => {
@@ -688,7 +786,7 @@ function renderRows(node) {
         }
 
         const del = document.createElement("div");
-        del.className = "wm-del";
+        del.className = "wm-xy-del";
         del.textContent = "✕";
         del.title = "删除";
         del.onclick = () => {
@@ -709,9 +807,11 @@ function renderRows(node) {
 function updateFolderBtn(btn, node) {
     if (!btn) return;
     const f = node.__folderFilter;
-    let txt = "📁 文件夹筛选";
-    if (Array.isArray(f) && f.length) txt = `📁 文件夹筛选 · ${f.length} 文件夹`;
-    btn.textContent = txt;
+    const n = Array.isArray(f) ? f.length : 0;
+    btn.innerHTML =
+        `<span class="wm-xy-fb-ic">📁</span><span class="wm-xy-fb-txt">文件夹筛选</span>` +
+        (n ? `<span class="wm-xy-fb-badge">${n}</span>` : `<span class="wm-xy-fb-badge off">全部</span>`) +
+        `<span class="wm-xy-fb-chev">▾</span>`;
 }
 
 //==============================================================================
@@ -726,11 +826,11 @@ function buildCoreUI(node) {
     loadStack(node);
 
     const container = document.createElement("div");
-    container.className = "wm-lora-container";
+    container.className = "wm-xy-container";
 
     // 1) 文件夹筛选按钮（DOM，置于最上）
     const folderBtn = document.createElement("button");
-    folderBtn.className = "wm-folder-btn";
+    folderBtn.className = "wm-xy-folderbtn";
     folderBtn.type = "button";
     folderBtn.onclick = () => {
         openFolderModal(node, node.__folderFilter || [], (sel) => {
@@ -744,13 +844,13 @@ function buildCoreUI(node) {
 
     // 2) 行容器
     const rowsEl = document.createElement("div");
-    rowsEl.className = "wm-lora-rows";
+    rowsEl.className = "wm-xy-rows";
     container.append(rowsEl);
     node.__rowsEl = rowsEl;
 
     // 3) Add 模型按钮
     const addBtn = document.createElement("button");
-    addBtn.className = "wm-lora-add";
+    addBtn.className = "wm-xy-add";
     addBtn.type = "button";
     addBtn.textContent = "+ Add 模型";
     addBtn.onclick = () => {
