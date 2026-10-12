@@ -1,16 +1,15 @@
-# ComfyUI-WindMix — LoRA 管理器节点（复刻 comfyui_fantastic-loras 的交互思路）
-#
-# 两个节点，均自带完整的「文件夹筛选 + Add Lora + 逐行(开关/强度/删除) + tag 自动填」
-# 交互界面（界面在 web/windmix_lora_manager.js 里用 DOM 行实现）。
+# ComfyUI-WindMix — LoRA 管理器节点
 #
 #   - WindMixLoraStack           ：数据节点，输出标准 LORA_STACK（每项 (name, model强度, clip强度)）
-#                                   外加一个 STRING 汇总所有启用 LoRA 的 tag，可接提示词或现有
-#                                   ⚡ XY Input: LoRA 的 lora_stack 输入口。
+#                                   外加 STRING 汇总启用 LoRA 的 tag。
 #   - WindMixLoraLoaderModelOnly ：处理节点，输入 MODEL + 自带 LoRA 列表，仅把 LoRA 打到 MODEL
 #                                   上（clip 传 None，不输出 CLIP）。
 #
-# 持久化：节点用一个隐藏的 `lora_data` STRING 控件存放 JSON（前端负责读写），ComfyUI 自动序列化。
-# 后端只负责解析该 JSON 并产出结果。
+# 界面在 web/windmix_lora_manager.js（搜索即添加 + Add LoRA 浏览弹窗 + 固定高度内滚动列表 +
+# 配方分组整体拖拽），⚡ XY 输入: LoRA2（WindMixLoraXY）共用那套界面。
+#
+# 持久化：隐藏的 `lora_data` STRING 控件存 JSON，ComfyUI 自动序列化，后端只解析：
+#   顶层行 [{on, name, model, tag}, ...] / 配方组 [{folder, on, open, loras:[...]}, ...] / {loras:[...]}
 
 from __future__ import annotations
 
@@ -25,15 +24,7 @@ MAX_LORA_ROWS = 50
 
 
 def _parse_stack(lora_data: str):
-    """把 lora_data(JSON 字符串) 解析成统一的条目列表（配方文件夹就地展开）。
-
-    兼容三种形态：
-      - 纯数组 [{name,model,tag,on}, ...]                    （旧格式，顶层 LoRA 行）
-      - 带文件夹的数组 [{folder,on,open,loras:[...]}, ...]   （配方，按显示顺序展开；
-        整组 on=false 时整组跳过）
-      - {loras:[...]} 包裹对象
-    只保留有 name 的合法条目，强度非法时回退 1.0。
-    """
+    """lora_data(JSON) → 统一条目列表；配方组按显示顺序就地展开，整组 on=false 时跳过。"""
     try:
         data = json.loads(lora_data or "[]")
     except Exception:
@@ -45,14 +36,16 @@ def _parse_stack(lora_data: str):
 
     out = []
 
-    def walk(items):
+    def walk(items, depth=0):
+        if depth > 4:  # 嵌套异常时不再深挖
+            return
         for e in items:
             if not isinstance(e, dict):
                 continue
             if e.get("folder"):
                 if not e.get("on", True):
                     continue
-                walk(e.get("loras") or [])
+                walk(e.get("loras") or [], depth + 1)
                 continue
             name = (e.get("name") or "").strip()
             if not name:
@@ -75,11 +68,7 @@ def _parse_stack(lora_data: str):
 
 
 def _build_outputs(stack):
-    """从条目列表产出去重后的 LORA_STACK 与 tag 汇总字符串。
-
-    只取启用的条目；clip 强度与 model 强度平行（model-only 场景下下游若接到
-    标准 loader 也能正常应用，clip 不被刻意清零）。
-    """
+    """启用条目 → (LORA_STACK, tag 汇总)。clip 强度恒等于 model。"""
     lora_stack = []
     tags = []
     for e in stack:
@@ -110,6 +99,7 @@ class WindMixLoraStack:
     RETURN_NAMES = ("lora_stack", "tags")
     FUNCTION = "run"
     CATEGORY = "⚡ WindMix/🎛️ LoRA"
+    DESCRIPTION = "LoRA 列表管理（搜索即添加 + Add LoRA 弹窗 + 配方分组），输出标准 LORA_STACK 与 tag 汇总。"
 
     def run(self, lora_data):
         stack = _parse_stack(lora_data)
@@ -133,6 +123,7 @@ class WindMixLoraLoaderModelOnly:
     RETURN_NAMES = ("MODEL", "tags")
     FUNCTION = "run"
     CATEGORY = "⚡ WindMix/🎛️ LoRA"
+    DESCRIPTION = "按列表顺序把 LoRA 逐个打到 MODEL 上（不动 CLIP），输出 tag 汇总。"
 
     def run(self, model, lora_data):
         stack = _parse_stack(lora_data)
@@ -147,6 +138,7 @@ class WindMixLoraLoaderModelOnly:
             try:
                 full = folder_paths.get_full_path("loras", name)
                 if not full:
+                    print(f"[WindMix LoRA] 跳过缺失的 LoRA: {name!r}")
                     continue
                 lora_sd = comfy.utils.load_torch_file(full, safe_load=True)
                 # clip 传 None ⇒ load_lora_for_models 只返回被打补丁的 model

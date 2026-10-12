@@ -1,15 +1,19 @@
 # ComfyUI-WindMix — 新版 XY 输入节点（沿用 LoRA Stack 的 DOM 行 UI 交互）
 #
 #   - WindMixLoraXY  ：⚡ XY 输入: LoRA2
-#       界面复用 web/windmix_lora_manager.js 的 LoRA Stack 行 UI（文件夹筛选 + Add LoRA
-#       + 逐行[开关/名称/强度/删除] + tag 自动填），数据落在隐藏的 `lora_data` 控件。
+#       界面复用 web/windmix_lora_manager.js 的 LoRA 卡片 UI（顶部搜索框输入即出候选、
+#       回车添加，底部 Add LoRA / 新建配方 走浏览弹窗，弹窗左栏按文件夹筛；
+#       逐行[开关/名称/强度/tag/删除]，tag 从模型元数据自动填），数据落在隐藏的 `lora_data` 控件。
 #       输出单个 XY 引脚（x_or_y），接到 ⚡ XY Plot 的 X 或 Y 输入。
 #       每个启用行 = X/Y 轴上的一个格子，单元格内只加载该行那一个 LoRA（沿用原
 #       ⚡ XY Input: LoRA 行为）。可选「无 LoRA 基线」开关（默认开）。
 #
 #   - WindMixUNetXY  ：⚡ XY 输入: UNet2
-#       界面在 web/windmix_xy_unet_manager.js（仅 Model Names 模式）：文件夹筛选 +
-#       Add 模型 + 逐行[开关/名称/删除]，数据落在隐藏的 `unet_data` 控件。
+#       界面在 web/windmix_xy_unet_manager.js（仅 Model Names 模式），与 LoRA 卡片同一套
+#       配色/按钮：样式、图标、提示条、节点底距几何引擎都直接 import windmix_lora_manager.js
+#       的共用件。搜索即添加 + Add 模型 浏览弹窗（左栏按文件夹筛、可多选）+
+#       逐行[手柄/开关/名称/删除]，点名称可重选、悬停看预览；模型没有强度/tag，也不分组。
+#       数据落在隐藏的 `unet_data` 控件，格式 [{on,name}, ...]（与旧版兼容）。
 #       输出单个 XY 引脚（x_or_y），接到 ⚡ XY Plot 的 X 或 Y 输入。
 #       每个启用行 = 一个格子，单元格 = (unet_name, None, None)。
 #

@@ -24,6 +24,19 @@
 >
 > 设好后，预设里的每条提示词会被切成一个独立分组，依次出图。
 
+### 4. LoRA 加载器 · 配方分组（Recipe Groups）
+
+`🎛️ LoRA Stack` 不止是多 LoRA 堆叠——它支持把一组 LoRA 打包成一个**配方（Recipe）**，整体管理：
+
+- **配方分组**：把常用搭配的多个 LoRA 收进一个命名组，组内可整体**启停**、整体**拖拽排序**，告别平铺长列表；
+- **搜索即添加 / 浏览弹窗**：输入即搜，或用 `Add LoRA` 弹窗按文件夹挑模型，不用来回切下拉框；
+- **强度比例条**：每个 LoRA 单独设 model 强度（clip 强度自动等同 model），配比一目了然；
+- **tag 自动汇总**：每个 LoRA 的触发词（读本地 `<LoRA名>.metadata.json`，不联网）自动拼进正向提示词；
+- **标准输出**：输出 ComfyUI 原生 `LORA_STACK` + 汇总 `tags`，无缝接效率 / 采样节点；
+- **配方持久化**：整张表存在隐藏 `lora_data` JSON 里，随工作流一起保存，整组关闭即跳过。
+
+配套 `🎛️ LoRA Loader (Model Only)` 仅把这套 LoRA 打到 `MODEL`（不动 CLIP），`📊 XY 输入: LoRA2` 也复用同一套界面做换轴对比。
+
 ---
 
 ## 一、安装
@@ -73,8 +86,8 @@ ComfyUI/
 |---|---|---|---|
 | 📦 名称加载器 | 📦 Checkpoint Loader With Name | `WindMix_CheckpointLoaderWithName` | 按名字（文本框）而非下拉框加载 Checkpoint |
 | 📦 名称加载器 | 📦 UNET Loader With Name | `WindMix_UNETLoaderWithName` | 同上，加载 UNET |
-| 🎛️ LoRA | 🎛️ LoRA Stack | `WindMixLoraStack` | 多 LoRA 堆叠，输出给效率节点 |
-| 🎛️ LoRA | 🎛️ LoRA Loader (Model Only) | `WindMixLoraLoaderModelOnly` | 仅返回加载了 LoRA 的 MODEL |
+| 🎛️ LoRA | 🎛️ LoRA Stack | `WindMixLoraStack` | 多 LoRA 堆叠 + **配方分组**（整组启停/拖拽），输出标准 LORA_STACK 与 tag 汇总 |
+| 🎛️ LoRA | 🎛️ LoRA Loader (Model Only) | `WindMixLoraLoaderModelOnly` | 仅把配方里的 LoRA 打到 MODEL（不动 CLIP） |
 | 🚀 效率节点 | 🚀 XL 效率加载器 | `⚡ Efficient Loader` | 移植自 efficiency，`⚡` 前缀可与原版并存 |
 | 🚀 效率节点 | 🚀 效率采样器 | `⚡ KSampler (Efficient)` | — |
 | 🚀 效率节点 | 🚀 效率采样器(高级) | `⚡ KSampler Adv. (Efficient)` | — |

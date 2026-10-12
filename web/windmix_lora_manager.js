@@ -1,22 +1,43 @@
 import { app } from "/scripts/app.js";
 
-console.log("[WindMix] lora_manager.js loaded, url=", import.meta.url);
+// =============================================================================
+// WindMix LoRA 管理器（WindMixLoraStack / WindMixLoraLoaderModelOnly / WindMixLoraXY 共用）
+// 界面全在这个文件里（后端 nodes/windmix_lora_nodes.py + nodes/windmix_xy_inputs.py）。
+// 节点高度与条目数解耦：computeSize 上报常量 UI_H，条目多了走列表内滚动。
+//
+// 数据契约：
+//   [{on,name,model,tag}, ...]                     —— 顶层 LoRA 行
+//   [{folder:"配方名",on,open,loras:[...]}, ...]   —— 配方组（后端按显示顺序展开）
+//   {loras:[...]}                                  —— 包裹形（历史兼容）
+//
+// 文件里标了 export 的部分是「共用件」（样式 / 图标 / 路径工具 / 隐藏控件 / 底距几何引擎），
+// web/windmix_xy_unet_manager.js（UNet2）直接 import 过去，保证两个节点同一套配色和按钮。
+// 几何引擎按 node.__wm2* 这组字段名读缓存，用它的节点必须沿用同样的字段名。
+// =============================================================================
 
-// 两个节点共用这一套 DOM 行 UI：
-//   顶部按钮行[新建配方(图标) + 文件夹筛选] + 逐行卡片[拨杆开关/名称/强度/tag图标/删除]
-//   + 行内 tag 折叠区（收起显示预览小字，展开为编辑框）+ 可折叠配方文件夹（整组开关/双击改名/
-//   组内添加）+ 全元素拖拽排序（顶层行 / 配方组 / 组内行 互相拖动调序，行可拖入配方）。
-// 数据持久化在隐藏的 `lora_data` STRING 控件里：
-//   [{on,name,model,tag}, ...]                      —— 顶层 LoRA 行（旧格式，完全兼容）
-//   [{folder:"配方名",on,open,loras:[...]}, ...]    —— 配方文件夹（后端按显示顺序展开）
-// __tagOpen / open 等 UI 状态不入持久化 JSON（open 除外，跟随保存）。
 const NODE_TYPES = ["WindMixLoraStack", "WindMixLoraLoaderModelOnly", "WindMixLoraXY"];
 const DATA_WIDGET = "lora_data";
 const DEF_STRENGTH = 1.0;
-const ROW_H = 76; // 单行卡片估算高度兜底（computeSize 优先实测 DOM 高度）
+export const MAX_ROWS = 50;
+
+// 固定高度（px）：搜索行 32 + 间距 7 + 列表 292 + 间距 7 + 底部按钮 31
+const LIST_H = 292;
+export const UI_H = 32 + 7 + LIST_H + 7 + 31;
+export const MIN_NODE_W = 400;
+// 容器高 = 节点高 - chrome（标题栏 + 内边距），chrome 实测失败时用 DEFAULT_CHROME
+const DEFAULT_CHROME = 34;
+// 节点被缩得很矮时的下限：列表再小就没法操作了，按钮条高度不参与压缩
+const LIST_MIN = 60;
+const MIN_CONTAINER_H = 32 + 7 + LIST_MIN + 7 + 31;
+// 悬浮预览：只有图，3:4
+export const PV_W = 264;
+export const PV_H = Math.round((PV_W * 4) / 3);
+// 量不到底距时的兜底（LiteGraph 给 DOM widget 的左右内边距实测就是 15）
+const DEFAULT_INSET = 15;
+const GAP_SAFETY = 10;
 
 //==============================================================================
-// LoRA 列表（后端 /windmix/loras）
+// 后端数据源（与 v1 同一套路由）
 //==============================================================================
 let _loraCache = null;
 async function getLoraFiles(force = false) {
@@ -32,21 +53,8 @@ async function getLoraFiles(force = false) {
     return _loraCache || [];
 }
 
-// 监听 ComfyUI 刷新（按 R）时清空 LoRA 缓存，使新下载 / 换文件夹的 LoRA 立即可见
-if (app.refreshComboInsp) {
-    const _origLoraRefresh = app.refreshComboInsp.bind(app);
-    app.refreshComboInsp = function (...args) {
-        _loraCache = null;
-        _previewVer += 1; // 换图 / 新下载后让浏览器重新取图（URL 上的 v 变化）
-        return _origLoraRefresh(...args);
-    };
-}
-
-//==============================================================================
-// tag（后端 /windmix/lora_metadata 读 civitai.trainedWords）
-//==============================================================================
 async function fetchTag(name) {
-    if (!name || name === "None") return "";
+    if (!name) return "";
     try {
         const r = await fetch(`/windmix/lora_metadata?name=${encodeURIComponent(name)}`);
         const j = await r.json();
@@ -56,135 +64,54 @@ async function fetchTag(name) {
     }
 }
 
-//==============================================================================
-// 模型预览图：只认「模型同目录的同名图片」，由 WindMix 自己的后端提供
-//   GET /WM_studio/prompt-studio/model-preview?type=loras&name=<相对路径>
-// 刻意不接外部插件的预览接口：图片数据源自包含，跨插件取图来源不唯一。
-//==============================================================================
-const WM_PREVIEW_TYPE = "loras";
-let _previewVer = 0; // 按 R 刷新时 +1，绕过浏览器 1 小时的图片缓存
-
-async function previewCandidates(name) {
-    if (!name || name === "None") return [];
-    return [
-        `/WM_studio/prompt-studio/model-preview?type=${WM_PREVIEW_TYPE}` +
-            `&name=${encodeURIComponent(name)}&v=${_previewVer}`,
-    ];
+// 预览图：只认「模型同目录同名图片」，由 WindMix 自己的后端提供
+let _previewVer = 0;
+function previewUrl(name) {
+    return `/WM_studio/prompt-studio/model-preview?type=loras` +
+        `&name=${encodeURIComponent(name)}&v=${_previewVer}`;
 }
 
-// img 依次尝试候选 src，全部失败则隐藏（不留占位）；onFail 为最终失败回调
-function applyImgCandidates(img, cands, onFail) {
-    let i = 0;
-    img.style.display = "";
-    img.onerror = () => {
-        i += 1;
-        if (i < cands.length) img.src = cands[i];
-        else { img.style.display = "none"; if (onFail) onFail(); }
+if (app.refreshCombo) {
+    const _orig = app.refreshCombo.bind(app);
+    app.refreshCombo = function (...args) {
+        _loraCache = null;
+        _previewVer += 1;
+        return _orig(...args);
     };
-    if (cands.length) img.src = cands[0];
-    else { img.style.display = "none"; if (onFail) onFail(); }
-}
-
-// ---- hover 预览浮窗（单例，跟随鼠标；悬停行内模型名 / 选择器条目时显示）----
-let _previewPop = null;
-let _popToken = 0;
-function getPreviewPop() {
-    if (!_previewPop || !_previewPop.isConnected) {
-        _previewPop = document.createElement("div");
-        _previewPop.className = "wm-preview-pop";
-        _previewPop.style.display = "none";
-        _previewPop.append(document.createElement("img"));
-        document.body.append(_previewPop);
-    }
-    return _previewPop;
-}
-function movePreviewPop(e) {
-    if (!_previewPop || _previewPop.style.display === "none") return;
-    const w = _previewPop.offsetWidth || 300;
-    const h = _previewPop.offsetHeight || 240;
-    let x = e.clientX + 18, y = e.clientY + 14;
-    if (x + w > window.innerWidth - 8) x = Math.max(8, e.clientX - w - 18);
-    if (y + h > window.innerHeight - 8) y = Math.max(8, window.innerHeight - h - 8);
-    _previewPop.style.left = x + "px";
-    _previewPop.style.top = y + "px";
-}
-function showPreviewPop(name, e) {
-    const tok = ++_popToken;
-    previewCandidates(name).then((c) => {
-        if (tok !== _popToken || !c.length) return;
-        const pop = getPreviewPop();
-        pop.style.display = "block";
-        applyImgCandidates(pop.firstChild, c, () => hidePreviewPop());
-        movePreviewPop(e);
-    });
-}
-function hidePreviewPop() {
-    _popToken += 1; // 使途中的异步结果作废
-    if (_previewPop) {
-        _previewPop.style.display = "none";
-        _previewPop.firstChild.removeAttribute("src");
-    }
 }
 
 //==============================================================================
-// 路径 / 文件夹工具
+// 路径工具
 //==============================================================================
-function norm(p) {
-    return (p || "").replace(/\\/g, "/");
-}
-function folderOf(path) {
-    const np = norm(path);
-    const i = np.lastIndexOf("/");
-    return i >= 0 ? np.slice(0, i + 1) : "";
-}
-function basename(p) {
-    const parts = norm(p).split("/");
-    return parts[parts.length - 1] || p;
-}
-function enabledSetOf(node) {
-    const f = node.__folderFilter;
-    if (!Array.isArray(f) || f.length === 0) return null; // null = 全部
-    return new Set(f.map(norm));
-}
-function lorasInFolders(all, set) {
-    if (!set) return all.slice();
-    return all.filter((p) => {
-        const d = folderOf(p);
-        for (const f of set) {
-            const nf = norm(f);
-            if (nf === "" || d === nf || d.startsWith(nf)) return true;
-        }
-        return false;
-    });
-}
+export const norm = (p) => (p || "").replace(/\\/g, "/");
+export const dirOf = (p) => { const i = norm(p).lastIndexOf("/"); return i >= 0 ? norm(p).slice(0, i) : ""; };
+export const baseOf = (p) => { const i = norm(p).lastIndexOf("/"); return i >= 0 ? norm(p).slice(i + 1) : norm(p); };
+export const stemOf = (n) => n.replace(/\.(safetensors|ckpt|pt|bin)$/i, "");
+export const extOf = (n) => { const m = n.match(/\.(safetensors|ckpt|pt|bin)$/i); return m ? m[0] : ""; };
+const clampStep = (v) => Math.round(v * 20) / 20;   // 0.05 步进，避免拖出 0.73333
 
 //==============================================================================
-// 数据持久化（隐藏 lora_data 控件）
-// 顶层条目：{on,name,model,tag} 或 {folder,on,open,loras:[...]}
-// __tagOpen 是会话级 UI 状态，syncData 时剔除。
+// 数据读写（隐藏 lora_data 控件）
 //==============================================================================
 function getDataWidget(node) {
     return (node.widgets || []).find((w) => w.name === DATA_WIDGET);
 }
-function hideWidget(node, w) {
+
+// 隐藏控件：Nodes 1.0 看 widget.hidden，Nodes 2.0（Vue）只认响应式 _state.options.hidden
+export function hideWidget(node, w) {
     if (!w) return;
-    // ---- Nodes 1.0（litegraph 画布，读 widget.hidden）----
     w.computeSize = () => [0, -4];
     w.type = "wm_hidden";
     w.hidden = true;
     if (w.element) w.element.style.display = "none";
-    w._origDraw = w.draw;
     w.draw = function () {};
-    // ---- Nodes 2.0（Vue，只认响应式 state 的 options.hidden，不看 widget.hidden）----
     const applyState = () => {
         if (w._state && w._state.options) {
-            w._state.options.hidden = true;
             try { w._state.options = { ...w._state.options, hidden: true }; } catch (e) {}
         }
     };
-    if (w._state) {
-        applyState();
-    } else if (w.options) {
+    if (w._state) applyState();
+    else if (w.options) {
         w.options.hidden = true;
         if (!w._wmStateRetry) {
             w._wmStateRetry = true;
@@ -198,1296 +125,1783 @@ function hideWidget(node, w) {
         }
     }
 }
+
 function _num(v) {
     return typeof v === "number" && Number.isFinite(v) ? v : DEF_STRENGTH;
 }
+
 function _parseEntry(e) {
-    if (e.folder) {
+    if (e && e.folder) {
         return {
             folder: String(e.folder),
             on: e.on !== false,
             open: e.open !== false,
-            __tagOpen: false,
-            loras: (Array.isArray(e.loras) ? e.loras : [])
-                .filter((r) => r && typeof r === "object")
-                .map((r) => ({
-                    on: r.on !== false,
-                    name: (r.name || "").toString(),
-                    model: _num(r.model),
-                    tag: (r.tag || "").toString(),
-                    __tagOpen: false,
-                })),
+            loras: Array.isArray(e.loras) ? e.loras.filter((x) => x && typeof x === "object").map(_parseEntry) : [],
         };
     }
     return {
-        on: e.on !== false,
-        name: (e.name || "").toString(),
-        model: _num(e.model),
-        tag: (e.tag || "").toString(),
-        __tagOpen: false,
+        on: !e || e.on !== false,
+        name: (e && e.name) || "",
+        model: _num(e && e.model),
+        tag: (e && e.tag) || "",
     };
 }
+
+function _entryToJson(e) {
+    if (e.folder) {
+        return { folder: e.folder, on: e.on !== false, open: e.open !== false, loras: (e.loras || []).map(_entryToJson) };
+    }
+    return { on: e.on !== false, name: e.name || "", model: _num(e.model), tag: e.tag || "" };
+}
+
 function loadStack(node) {
     const w = getDataWidget(node);
     let arr = [];
     try {
         const p = JSON.parse(w?.value || "[]");
-        arr = Array.isArray(p) ? p : (p.loras || []);
+        arr = Array.isArray(p) ? p : (p && Array.isArray(p.loras) ? p.loras : []);
     } catch (e) {
         arr = [];
     }
-    node.__loraStack = arr
-        .filter((e) => e && typeof e === "object")
-        .map(_parseEntry);
-    node.__folderFilter = Array.isArray(node.properties?.folder_filter)
-        ? node.properties.folder_filter
-        : null;
+    node.__wm2Stack = arr.filter((e) => e && typeof e === "object").map(_parseEntry);
+    node.__wm2TagOpen = node.__wm2TagOpen || new Set();
+    node.__wm2Sel = node.__wm2Sel || null;
+    node.__wm2Kw = "";
 }
-function _entryToJson(e) {
-    if (e.folder) {
-        return {
-            folder: e.folder,
-            on: e.on !== false,
-            open: e.open !== false,
-            loras: (e.loras || []).map(_entryToJson),
-        };
-    }
-    return {
-        on: e.on !== false,
-        name: e.name || "",
-        model: _num(e.model),
-        tag: e.tag || "",
-    };
-}
+
 function syncData(node) {
     const w = getDataWidget(node);
     if (!w) return;
-    w.value = JSON.stringify((node.__loraStack || []).map(_entryToJson));
-    if (!node.properties) node.properties = {};
-    node.properties.folder_filter = Array.isArray(node.__folderFilter) ? node.__folderFilter : [];
+    w.value = JSON.stringify((node.__wm2Stack || []).map(_entryToJson));
+    node.setDirtyCanvas?.(true, false);
 }
 
-//==============================================================================
-// 拖拽路径解析： "t3"=顶层第3项  "g1"=第1个配方(组)  "g1r2"=配方1内第2行
-//==============================================================================
-function pathParts(p) {
-    if (typeof p !== "string" || !p) return null;
-    if (p[0] === "t") {
-        const i = parseInt(p.slice(1), 10);
-        return Number.isInteger(i) ? { k: "top", i } : null;
-    }
-    const m = p.match(/^g(\d+)(?:r(\d+))?$/);
-    if (!m) return null;
-    return m[2] == null ? { k: "grp", i: +m[1] } : { k: "grow", g: +m[1], i: +m[2] };
-}
-function peekItem(node, p) {
-    const s = node.__loraStack || [];
-    if (!p) return null;
-    if (p.k === "top" || p.k === "grp") return s[p.i] || null;
-    if (p.k === "grow") return s[p.g]?.loras?.[p.i] || null;
-    return null;
-}
-function removeItem(node, p) {
-    const s = node.__loraStack || [];
-    if (p.k === "top" || p.k === "grp") return s.splice(p.i, 1)[0];
-    if (p.k === "grow") return s[p.g]?.loras?.splice(p.i, 1)[0];
-    return null;
-}
-// 顶层重名规则：顶层（不含配方内）同名只能有一个；配方内 / 配方与顶层之间允许同名。
-function topNameConflict(node, item) {
-    const n = norm(item.name || "");
-    if (!n) return false;
-    return (node.__loraStack || []).some(
-        (e) => !e.folder && e !== item && norm(e.name || "") === n
-    );
-}
-
-//==============================================================================
-// 文件夹树弹窗（外部文件夹筛选，样式跟随 WindMix 主题）
-//==============================================================================
-function buildTree(all) {
-    const root = { folders: {}, files: [], fileCount: 0, prefix: "", name: "(根目录)", _open: true };
-    const ensure = (prefix) => {
-        if (!prefix) return root;
-        const parts = prefix.replace(/\/$/, "").split("/");
-        let n = root;
-        let acc = "";
-        for (const p of parts) {
-            acc += p + "/";
-            if (!n.folders[p]) n.folders[p] = { folders: {}, files: [], fileCount: 0, prefix: acc, name: p, _open: false };
-            n = n.folders[p];
-        }
-        return n;
-    };
-    for (const path of all) {
-        const np = norm(path);
-        const idx = np.lastIndexOf("/");
-        const dir = idx >= 0 ? np.slice(0, idx + 1) : "";
-        const n = ensure(dir);
-        n.files.push(path);
-        n.fileCount++;
-    }
-    return root;
-}
-function collectPrefixes(node, out) {
-    out.add(node.prefix);
-    for (const c of Object.values(node.folders)) collectPrefixes(c, out);
+// 展平：[{entry, gi, lj}] —— gi<0 表示顶层行
+function allRows(node) {
+    const out = [];
+    (node.__wm2Stack || []).forEach((e, i) => {
+        if (e.folder) (e.loras || []).forEach((l, j) => out.push({ entry: l, gi: i, lj: j }));
+        else out.push({ entry: e, gi: -1, lj: -1 });
+    });
     return out;
 }
-function openFolderModal(node, current, onApply) {
-    injectStyle();
-    getLoraFiles(true).then((all) => {
-        const tree = buildTree(all);
-        const selected = new Set(current && current.length ? current : collectPrefixes(tree, new Set()));
-
-        let backdrop = document.getElementById("wm_lora_folder_modal");
-        if (backdrop) backdrop.remove();
-        backdrop = document.createElement("div");
-        backdrop.id = "wm_lora_folder_modal";
-        backdrop.className = "wm-folder-backdrop";
-        backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
-
-        const dialog = document.createElement("div");
-        dialog.className = "wm-folder-dialog";
-
-        const header = document.createElement("div");
-        header.className = "wm-folder-header";
-        const title = document.createElement("div");
-        title.className = "wm-folder-title";
-        title.textContent = "选择 LoRA 文件夹";
-        const closeBtn = document.createElement("div");
-        closeBtn.className = "wm-folder-close";
-        closeBtn.textContent = "✕";
-        closeBtn.onclick = () => backdrop.remove();
-        header.append(title, closeBtn);
-
-        const toolbar = document.createElement("div");
-        toolbar.className = "wm-folder-toolbar";
-        const mkBtn = (label) => {
-            const b = document.createElement("button");
-            b.type = "button";
-            b.className = "wm-btn";
-            b.textContent = label;
-            return b;
-        };
-        const selAll = mkBtn("全选");
-        const selNone = mkBtn("全不选");
-        selAll.onclick = () => { collectPrefixes(tree, selected); renderTree(); };
-        selNone.onclick = () => { selected.clear(); renderTree(); };
-        toolbar.append(selAll, selNone);
-
-        const treeBox = document.createElement("div");
-        treeBox.className = "wm-folder-tree";
-
-        function renderTree() {
-            treeBox.innerHTML = "";
-            const renderNode = (n, depth) => {
-                const row = document.createElement("div");
-                row.className = "wm-folder-row";
-                row.style.marginLeft = depth * 14 + "px";
-                const tri = document.createElement("span");
-                tri.textContent = n._open === false ? "▸" : "▾";
-                tri.className = "wm-folder-tri";
-                const cb = document.createElement("input");
-                cb.type = "checkbox";
-                cb.className = "wm-folder-cb";
-                cb.checked = selected.has(n.prefix);
-                cb.onchange = () => {
-                    const desc = collectPrefixes(n, new Set());
-                    if (cb.checked) desc.forEach((p) => selected.add(p));
-                    else desc.forEach((p) => selected.delete(p));
-                    renderTree();
-                };
-                const label = document.createElement("span");
-                label.className = "wm-folder-label";
-                label.textContent = n.name;
-                const cnt = document.createElement("span");
-                cnt.className = "wm-folder-cnt";
-                cnt.textContent = "(" + n.fileCount + ")";
-                tri.onclick = () => { n._open = n._open === false ? true : false; renderTree(); };
-                row.append(tri, cb, label, cnt);
-                treeBox.append(row);
-                if (n._open !== false) {
-                    for (const child of Object.values(n.folders)) renderNode(child, depth + 1);
-                }
-            };
-            renderNode(tree, 0);
-        }
-        renderTree();
-
-        const footer = document.createElement("div");
-        footer.className = "wm-folder-footer";
-        const cancel = mkBtn("取消");
-        cancel.style.flex = "0 0 auto";
-        cancel.style.padding = "6px 18px";
-        cancel.onclick = () => backdrop.remove();
-        const apply = mkBtn("应用");
-        apply.className = "wm-btn wm-btn-primary";
-        apply.onclick = () => {
-            const allPrefixes = collectPrefixes(tree, new Set());
-            const isAll = [...selected].sort().join("|") === [...allPrefixes].sort().join("|");
-            onApply(isAll ? null : [...selected], isAll);
-            backdrop.remove();
-        };
-        footer.append(cancel, apply);
-
-        dialog.append(header, toolbar, treeBox, footer);
-        backdrop.append(dialog);
-        document.body.append(backdrop);
-    });
+const activeRows = (node) => allRows(node).filter((r) => r.entry.on && (r.gi < 0 || (node.__wm2Stack[r.gi] || {}).on !== false));
+function findRow(node, name) {
+    return allRows(node).find((r) => norm(r.entry.name) === norm(name)) || null;
 }
-
-//==============================================================================
-// LoRA 选择器（点名称/Add 时弹出，内置文件夹侧栏 + 搜索 + 外部筛选叠加）
-// onChoose 返回 false = 拒绝本次选择（如顶层重名拦截），选择器保持打开。
-//==============================================================================
-let _chooserEl = null;
-let _chooserDocHandler = null;
-let _chooserToken = 0;
-function closeChooser() {
-    hidePreviewPop();
-    document.querySelectorAll(".wm-chooser").forEach((el) => el.remove());
-    _chooserEl = null;
-    if (_chooserDocHandler) {
-        window.removeEventListener("pointerdown", _chooserDocHandler, true);
-        _chooserDocHandler = null;
+// 「已用」只看顶层行：配方里挂过的条目不算外面用了，内外可以同时挂同一个 LoRA
+function usedTopPaths(node) {
+    return new Set((node.__wm2Stack || []).filter((e) => e && !e.folder)
+        .map((e) => norm(e.name)).filter(Boolean));
+}
+// 某个路径是否已经挂在某个配方里（顶层弹窗要用它给提示胶囊，但绝不拦添加）
+const inAnyGroup = (node, path) => (node.__wm2Stack || [])
+    .some((e) => e.folder && (e.loras || []).some((l) => norm(l.name) === norm(path)));
+function removeRow(node, name) {
+    const r = findRow(node, name);
+    if (!r) return;
+    if (r.gi < 0) { const i = node.__wm2Stack.indexOf(r.entry); if (i >= 0) node.__wm2Stack.splice(i, 1); }
+    else { const g = node.__wm2Stack[r.gi]; if (g) { const j = g.loras.indexOf(r.entry); if (j >= 0) g.loras.splice(j, 1); } }
+}
+// 注意：先抓对象引用再摘除源行，否则下标会因删除而整体错位
+function moveRow(node, fromName, toName, after) {
+    const f = findRow(node, fromName), t = findRow(node, toName);
+    if (!f || !t || f.entry === t.entry) return;
+    const entry = f.entry;
+    const targetGroup = t.gi < 0 ? null : node.__wm2Stack[t.gi];
+    removeRow(node, fromName);
+    if (!targetGroup) {
+        const i = node.__wm2Stack.indexOf(t.entry);
+        if (i < 0) return;
+        node.__wm2Stack.splice(after ? i + 1 : i, 0, entry);
+    } else {
+        const j = targetGroup.loras.indexOf(t.entry);
+        if (j < 0) return;
+        targetGroup.loras.splice(after ? j + 1 : j, 0, entry);
     }
 }
-function showChooser(node, onChoose, onCancel) {
-    injectStyle();
-    closeChooser();
-    const token = ++_chooserToken;
-    getLoraFiles().then((all) => {
-        if (token !== _chooserToken) return;
-        const set = enabledSetOf(node);
-        const loras = lorasInFolders(all, set);
-
-        const panel = document.createElement("div");
-        panel.className = "wm-chooser";
-
-        const header = document.createElement("div");
-        header.className = "wm-chooser-header";
-        const t = document.createElement("span");
-        t.className = "wm-chooser-title";
-        t.textContent = "选择 LoRA";
-        const x = document.createElement("span");
-        x.className = "wm-chooser-close";
-        x.textContent = "✕";
-        x.onclick = () => { closeChooser(); if (typeof onCancel === "function") onCancel(); };
-        header.append(t, x);
-        panel.append(header);
-
-        const body = document.createElement("div");
-        body.className = "wm-chooser-body";
-        panel.append(body);
-
-        // 左侧文件夹栏：从路径解析子目录；选父目录时包含其子目录里的文件
-        const side = document.createElement("div");
-        side.className = "wm-chooser-side";
-        body.append(side);
-        let curDir = null; // null = 全部
-        const sideItems = [];
-        const dirLabel = (d) => {
-            if (!d) return "(根目录)";
-            const parts = norm(d).replace(/\/$/, "").split("/");
-            return parts[parts.length - 1] || d;
-        };
-        const mkSide = (label, dir, count) => {
-            const it = document.createElement("div");
-            it.className = "wm-chooser-side-item" + (dir === null ? " active" : "");
-            const lbl = document.createElement("span");
-            lbl.className = "lbl";
-            lbl.textContent = label;
-            const n = document.createElement("span");
-            n.className = "n";
-            n.textContent = count;
-            it.append(lbl, n);
-            it.title = dir === null ? "全部 LoRA" : dir;
-            it.__dir = dir;
-            it.onclick = () => {
-                curDir = dir;
-                sideItems.forEach((s) => s.classList.toggle("active", s.__dir === dir));
-                render(search.value);
-            };
-            sideItems.push(it);
-            side.append(it);
-        };
-        mkSide("全部", null, loras.length);
-        const dirs = new Map();
-        for (const path of loras) {
-            const d = folderOf(path);
-            dirs.set(d, (dirs.get(d) || 0) + 1);
-        }
-        for (const [d, c] of [...dirs.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-            mkSide(dirLabel(d), d, c);
-        }
-
-        const main = document.createElement("div");
-        main.className = "wm-chooser-main";
-        body.append(main);
-
-        const search = document.createElement("input");
-        search.className = "wm-chooser-search";
-        search.placeholder = "搜索…";
-        main.append(search);
-
-        const list = document.createElement("div");
-        list.className = "wm-chooser-list";
-        main.append(list);
-
-        const foot = document.createElement("div");
-        foot.className = "wm-chooser-foot";
-        panel.append(foot);
-
-        const render = (q) => {
-            list.innerHTML = "";
-            const ql = (q || "").trim().toLowerCase();
-            let vis = curDir ? loras.filter((p) => folderOf(p).startsWith(curDir)) : loras.slice();
-            if (ql) vis = vis.filter((l) => l.toLowerCase().includes(ql));
-            if (!vis.length) {
-                const empty = document.createElement("div");
-                empty.className = "wm-chooser-empty";
-                empty.textContent = set ? "所选文件夹内无 LoRA" : "无匹配的 LoRA";
-                list.append(empty);
-            }
-            for (const path of vis) {
-                const item = document.createElement("div");
-                item.className = "wm-chooser-item";
-                item.textContent = basename(path);
-                item.title = path;
-                item.onclick = () => {
-                    const r = onChoose(path);
-                    if (r === false) return; // 被拦截（如顶层重名），选择器保持打开
-                    closeChooser();
-                };
-                item.addEventListener("mouseenter", (e) => showPreviewPop(path, e));
-                item.addEventListener("mousemove", movePreviewPop);
-                item.addEventListener("mouseleave", hidePreviewPop);
-                list.append(item);
-            }
-            foot.textContent = `共 ${vis.length} 个 · ${curDir === null ? "全部" : dirLabel(curDir)}`
-                + (set ? ` · 已按 ${set.size} 个文件夹筛选` : "");
-        };
-        render("");
-        search.oninput = () => render(search.value);
-
-        document.body.append(panel);
-        _chooserEl = panel;
-        _chooserDocHandler = (e) => {
-            if (_chooserEl && !_chooserEl.contains(e.target)) {
-                closeChooser();
-                if (typeof onCancel === "function") onCancel();
-            }
-        };
-        setTimeout(() => {
-            if (token === _chooserToken) window.addEventListener("pointerdown", _chooserDocHandler, true);
-        }, 0);
-        requestAnimationFrame(() => {
-            const w = panel.offsetWidth, h = panel.offsetHeight;
-            panel.style.left = Math.max(10, (window.innerWidth - w) / 2) + "px";
-            panel.style.top = Math.max(10, (window.innerHeight - h) / 2 - 60) + "px";
-        });
-    });
+function appendRowToGroup(node, fromName, gi) {
+    const src = findRow(node, fromName);
+    const g = node.__wm2Stack[gi];
+    if (!src || !g || !g.folder || src.gi === gi) return;
+    const entry = src.entry;
+    removeRow(node, fromName);
+    g.loras.push(entry);
 }
+// rawIdx 按「删除前」口径给出
+function moveGroup(node, from, rawIdx) {
+    const g = node.__wm2Stack[from];
+    if (!g) return;
+    node.__wm2Stack.splice(from, 1);
+    const idx = rawIdx > from ? rawIdx - 1 : rawIdx;
+    node.__wm2Stack.splice(Math.max(0, Math.min(node.__wm2Stack.length, idx)), 0, g);
+}
+function shiftRow(node, name, d) {
+    const r = findRow(node, name);
+    if (!r) return;
+    if (r.gi < 0) {
+        const i = node.__wm2Stack.indexOf(r.entry), j = i + d;
+        if (j < 0 || j >= node.__wm2Stack.length) return;
+        node.__wm2Stack.splice(i, 1); node.__wm2Stack.splice(j, 0, r.entry);
+    } else {
+        const a = node.__wm2Stack[r.gi].loras, j = r.lj + d;
+        if (j < 0 || j >= a.length) return;
+        a.splice(r.lj, 1); a.splice(j, 0, r.entry);
+    }
+}
+function uniqueGroupName(node) {
+    const names = new Set((node.__wm2Stack || []).filter((e) => e.folder).map((e) => e.folder));
+    let i = 1;
+    while (names.has(`配方 ${i}`)) i += 1;
+    return `配方 ${i}`;
+}
+const rowFull = (node) => allRows(node).length >= MAX_ROWS;
 
 //==============================================================================
-// 样式：--wm-lo-* 双主题变量（浅色默认，html.dark-theme 深色），与预设文本节点同一架构
+// 样式：--wm-lo-* 双主题令牌（浅色默认，html.dark-theme 覆盖）
 //==============================================================================
 let _styleInjected = false;
-function injectStyle() {
+export function injectStyle() {
     if (_styleInjected) return;
     _styleInjected = true;
     const s = document.createElement("style");
+    s.id = "wm-lora-v2-style";
     s.textContent = `
-/* ===== 主题令牌（容器内控件 + body 级弹窗共用） ===== */
-.wm-lora-container, .wm-chooser, .wm-folder-dialog, .wm-preview-pop {
-  --wm-lo-brand: #534AB7;
-  --wm-lo-accent: #534AB7;
-  --wm-lo-panel: #f2f2f3;
-  --wm-lo-field: #ffffff;
-  --wm-lo-fg: #1f1f21;
-  --wm-lo-dim: #85858c;
-  --wm-lo-line: #d8d8dc;
-  --wm-lo-line2: #c6c6cd;
-  --wm-lo-toggle: #c6c6cd;
-  --wm-lo-danger: #c0392b;
-  --wm-lo-grpbg: #e9eaf5;
-  --wm-lo-grpline: #d5d7ec;
-  --wm-lo-shadow: 0 8px 30px rgba(0,0,0,.18);
+.wm2-container, .wm2-ac, .wm2-modal, .wm2-pv {
+  --wm-lo-brand:#534AB7; --wm-lo-accent:#4a41a8; --wm-lo-accent-soft:rgba(83,74,183,.14);
+  --wm-lo-param:#534AB7;
+  --wm-lo-panel:#ffffff; --wm-lo-panel2:#f7f7fa; --wm-lo-field:#f0f0f4;
+  --wm-lo-row:#E9EAF5;
+  --wm-lo-fg:#14141a; --wm-lo-dim:#55555f;
+  --wm-lo-line:#cfcfd8; --wm-lo-line2:#b4b4c0;
+  --wm-lo-danger:#b3261e; --wm-lo-warn:#8a5a12;
+  --wm-lo-grpbg:#eaecf7; --wm-lo-grphead:linear-gradient(90deg, rgba(83,74,183,.16), rgba(83,74,183,.04));
+  --wm-lo-fill:rgba(83,74,183,.22); --wm-lo-sel:rgba(83,74,183,.15);
+  --wm-lo-shadow:0 10px 30px rgba(30,30,60,.18);
 }
-html.dark-theme .wm-lora-container, html.dark-theme .wm-chooser,
-html.dark-theme .wm-folder-dialog, html.dark-theme .wm-preview-pop {
-  --wm-lo-accent: #9b8af5;
-  --wm-lo-panel: #2a2a2a;
-  --wm-lo-field: #1e1e1e;
-  --wm-lo-fg: #e6e6e6;
-  --wm-lo-dim: #9a9a9a;
-  --wm-lo-line: #3a3a3a;
-  --wm-lo-line2: #454545;
-  --wm-lo-toggle: #4a4a52;
-  --wm-lo-danger: #e57373;
-  --wm-lo-grpbg: #272630;
-  --wm-lo-grpline: #3a3a48;
-  --wm-lo-shadow: 0 8px 30px rgba(0,0,0,.5);
+html.dark-theme .wm2-container, html.dark-theme .wm2-ac,
+html.dark-theme .wm2-modal, html.dark-theme .wm2-pv {
+  --wm-lo-brand:#6f63d8; --wm-lo-accent:#9b8af5; --wm-lo-accent-soft:rgba(155,138,245,.22);
+  --wm-lo-param:#9b8af5;
+  --wm-lo-panel:#2f2f33; --wm-lo-panel2:#2c2c2e; --wm-lo-field:#212123;
+  --wm-lo-row:#272630;
+  --wm-lo-fg:#ececee; --wm-lo-dim:#9a9aa2;
+  --wm-lo-line:#424246; --wm-lo-line2:#4e4e54;
+  --wm-lo-danger:#e57373; --wm-lo-warn:#e0a94a;
+  --wm-lo-grpbg:#2b2a36; --wm-lo-grphead:linear-gradient(90deg, rgba(155,138,245,.20), rgba(155,138,245,.05));
+  --wm-lo-fill:rgba(155,138,245,.26); --wm-lo-sel:rgba(155,138,245,.18);
+  --wm-lo-shadow:0 14px 40px rgba(0,0,0,.5);
 }
 
-.wm-lora-container { display:flex; flex-direction:column; gap:8px; padding-bottom:8px; }
+/* 容器：JS 按节点实际高度改写 inline height（见 lockBottomBar），差值由 flex:1 的列表吸收 */
+.wm2-container { display:flex; flex-direction:column; gap:7px; font-size:12px; height:${UI_H}px; box-sizing:border-box; }
 
-/* ---- 顶部按钮行：新建配方(图标) + 文件夹筛选 + LoRA 总数徽标 ---- */
-.wm-lora-toprow { display:flex; gap:8px; align-items:stretch; }
-.wm-lora-newgrp { flex:none; width:34px; height:34px; display:inline-flex; align-items:center; justify-content:center;
-  background:var(--wm-lo-field); border:1px solid var(--border-color,#444); border-radius:8px;
-  color:var(--wm-lo-accent); cursor:pointer; transition:border-color .12s, background .12s; }
-.wm-lora-newgrp:hover { border-color:var(--wm-lo-accent); background:rgba(83,74,183,.08); }
-.wm-folder-btn { display:flex; align-items:center; gap:6px; flex:1; min-width:0; min-height:34px; line-height:1;
-  background:var(--wm-lo-field); color:var(--wm-lo-fg);
-  border:1px solid var(--border-color,#444); border-radius:8px; padding:7px 10px;
-  cursor:pointer; font-size:12px; transition:border-color .12s, background .12s; }
-.wm-folder-btn:hover { border-color:var(--wm-lo-accent); background:rgba(83,74,183,.08); }
-.wm-fb-ic { display:inline-flex; align-items:center; font-size:13px; line-height:1; }
-.wm-fb-txt { line-height:1; }
-.wm-fb-badge { margin-left:auto; background:var(--wm-lo-brand); color:#fff; border-radius:999px;
-  padding:1px 8px; font-size:11px; line-height:14px; font-weight:600; flex:none; }
-.wm-fb-badge.off { background:var(--wm-lo-line2); color:var(--wm-lo-fg); font-weight:500; }
-.wm-fb-chev { color:var(--wm-lo-dim); font-size:10px; flex:none; }
-
-/* ---- 行（卡片：同配方组底色，无边框；tag 区与卡片同底色） ---- */
-.wm-lora-rows { display:flex; flex-direction:column; gap:6px; }
-.wm-lora-row { display:flex; flex-direction:column; min-width:0; padding:5px 8px 4px;
-  background:var(--wm-lo-grpbg); border-radius:10px;
-  transition:opacity .15s, box-shadow .12s; }
-.wm-lora-row.is-off { opacity:.5; }
-.wm-lora-row.dragging { opacity:.35; }
-.wm-lora-row.drop-target { box-shadow:inset 0 3px 0 0 var(--wm-lo-accent); }
-.wm-lora-row.drop-after { box-shadow:inset 0 -3px 0 0 var(--wm-lo-accent); }
-.wm-lora-main { display:flex; align-items:center; gap:6px; min-width:0; }
-.wm-grip { flex:none; display:inline-flex; align-self:center; cursor:grab; color:var(--wm-lo-dim);
-  opacity:.5; user-select:none; transition:opacity .12s, color .12s; }
-.wm-grip:hover { opacity:1; color:var(--wm-lo-accent); }
-.wm-grip:active { cursor:grabbing; }
-/* 开关：原生勾选框（同预设文本「随机选择」，accent-color 跟随主题） */
-.wm-on { flex:none; width:16px; height:16px; margin:0; accent-color:var(--comfy-primary,#534AB7); cursor:pointer; }
-.wm-name { flex:1 1 0; min-width:0; display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-  padding:0; color:var(--wm-lo-fg); font-size:12px; line-height:22px;
-  cursor:pointer; transition:color .12s; text-align:left; }
-.wm-name:hover { color:var(--wm-lo-accent); }
-.wm-strength { flex:none; width:52px; background:var(--wm-lo-field); border:1px solid var(--wm-lo-line2);
-  border-radius:6px; padding:3px 4px; color:var(--wm-lo-fg); font-size:12px; line-height:16px; font-weight:600;
-  font-variant-numeric:tabular-nums; text-align:center; box-sizing:border-box; outline:none;
+/* ---- 搜索即添加 ---- */
+.wm2-search { position:relative; box-sizing:border-box; display:flex; align-items:center; gap:7px; height:32px; flex:none;
+  background:var(--wm-lo-field); border:1px solid var(--wm-lo-line2); border-radius:8px; padding:0 8px;
   transition:border-color .12s, box-shadow .12s; }
-.wm-strength:focus { border-color:var(--wm-lo-accent); box-shadow:0 0 0 2px rgba(155,138,245,.22); }
-/* tag 图标 / 删除按钮：对齐预设文本 wm-st-fbtn（带边框小方按钮） */
-.wm-ic { flex:none; width:22px; height:22px; box-sizing:border-box; display:inline-flex; align-items:center; justify-content:center;
-  border:1px solid var(--border-color,#444); border-radius:6px; background:var(--wm-lo-field);
-  cursor:pointer; color:var(--wm-lo-fg); transition:background .12s, color .12s, border-color .12s; }
-.wm-ic svg { width:13px; height:13px; }
-.wm-ic:hover { background:rgba(83,74,183,.14); border-color:var(--wm-lo-accent); color:var(--wm-lo-accent); }
-.wm-ic.has { color:var(--wm-lo-accent); border-color:var(--wm-lo-accent); }
-.wm-ic.none { opacity:.45; }
-.wm-del { flex:none; width:22px; height:22px; box-sizing:border-box; display:inline-flex; align-items:center; justify-content:center;
-  border:1px solid var(--border-color,#444); border-radius:6px; background:var(--wm-lo-field);
-  color:var(--wm-lo-fg); font-size:12px; cursor:pointer; transition:background .12s, color .12s, border-color .12s; }
-.wm-del:hover { color:var(--wm-lo-danger); border-color:var(--wm-lo-danger); background:rgba(229,115,115,.12); }
+.wm2-search.focus { border-color:var(--wm-lo-accent); box-shadow:0 0 0 2px var(--wm-lo-accent-soft); }
+.wm2-search .mag { flex:none; color:var(--wm-lo-dim); display:inline-flex; }
+.wm2-search input { flex:1; min-width:0; background:none; border:none; outline:none; color:var(--wm-lo-fg);
+  font-size:12.5px; font-family:inherit; height:100%; }
+.wm2-search input::placeholder { color:var(--wm-lo-dim); font-style:italic; opacity:.85; }
+.wm2-search .kbd { flex:none; font-size:10px; color:var(--wm-lo-dim); border:1px solid var(--wm-lo-line);
+  border-radius:4px; padding:1px 5px; background:var(--wm-lo-panel); }
+.wm2-search .clr { flex:none; width:18px; height:18px; display:none; align-items:center; justify-content:center;
+  border-radius:5px; cursor:pointer; color:var(--wm-lo-dim); border:none; background:none; font-size:12px; }
+.wm2-search.has-q .clr { display:inline-flex; }
+.wm2-search .clr:hover { background:var(--wm-lo-accent-soft); color:var(--wm-lo-accent); }
 
-/* ---- tag 区（内容由 JS 条件渲染：展开=编辑框 / 收起+有tag=预览 / 无tag=零占位） ---- */
-.wm-tagzone { }
-.wm-tagprev { display:flex; align-items:center; gap:5px; margin-top:4px; padding:1px 2px; cursor:pointer;
-  font-size:11px; line-height:15px; color:var(--wm-lo-accent); opacity:.85; transition:opacity .12s; }
-.wm-tagprev:hover { opacity:1; }
-.wm-tagprev .wm-tarr { margin-left:auto; opacity:.6; font-size:10px; }
-.wm-tagbox { display:flex; align-items:center; gap:6px; margin-top:6px; padding-top:6px;
-  border-top:1px solid var(--wm-lo-line); }
-.wm-tagkey { flex:none; font-size:11px; line-height:14px; font-weight:600; color:var(--wm-lo-accent);
-  border:1px solid var(--wm-lo-accent); border-radius:4px; padding:1px 5px; letter-spacing:.5px; opacity:.8; }
-.wm-tagbox input { flex:1; min-width:0; background:var(--wm-lo-field); border:1px solid var(--wm-lo-line2);
-  border-radius:6px; padding:4px 7px; color:var(--wm-lo-fg); font-size:12px; line-height:16px;
-  box-sizing:border-box; outline:none; transition:border-color .12s, box-shadow .12s; }
-.wm-tagbox input:focus { border-color:var(--wm-lo-accent); box-shadow:0 0 0 2px rgba(155,138,245,.22); }
-.wm-tagbox input::placeholder { color:var(--wm-lo-dim); font-style:italic; opacity:.7; }
+/* 候选下拉（挂 body，fixed 定位，不受节点裁剪） */
+.wm2-ac { position:fixed; z-index:100012; display:none; width:360px; max-height:246px; overflow:auto;
+  box-sizing:border-box;   /* 否则 positionAc 给的 border-box 宽度会被 padding+border 再加 10px，下拉比节点宽 */
+  background:var(--wm-lo-panel); border:1px solid var(--wm-lo-line2); border-radius:9px;
+  box-shadow:var(--wm-lo-shadow); padding:4px; font-size:12px; scrollbar-width:thin; }
+.wm2-ac.open { display:block; }
+.wm2-ac .fold { font-size:10.5px; color:var(--wm-lo-dim); padding:5px 7px 3px; letter-spacing:.4px;
+  display:flex; align-items:center; gap:5px; }
+.wm2-ac .fold::after { content:''; flex:1; height:1px; background:var(--wm-lo-line); }
+.wm2-ac .it { display:flex; align-items:center; gap:7px; padding:5px 7px; border-radius:6px; cursor:pointer; }
+.wm2-ac .it .th { flex:none; width:22px; height:22px; border-radius:5px; display:inline-flex; align-items:center;
+  justify-content:center; font-size:9.5px; color:#dcd6ff; background:linear-gradient(135deg,#4a4380,#7a6cc0); overflow:hidden; }
+.wm2-ac .it .th img { width:100%; height:100%; object-fit:cover; display:block; }
+.wm2-ac .it .nm { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--wm-lo-fg); }
+.wm2-ac .it .nm mark { background:none; color:var(--wm-lo-accent); font-weight:700; }
+.wm2-ac .it.hi { background:var(--wm-lo-accent-soft); }
+.wm2-ac .it.hi .nm { color:var(--wm-lo-accent); font-weight:600; }
+.wm2-ac .foot { display:flex; gap:10px; padding:5px 8px 3px; font-size:10px; color:var(--wm-lo-dim);
+  border-top:1px solid var(--wm-lo-line); margin-top:3px; }
+.wm2-ac .none { padding:10px; color:var(--wm-lo-dim); font-style:italic; }
 
-/* ---- 配方文件夹 ---- */
-.wm-lora-group { background:var(--wm-lo-grpbg); border:1px solid var(--wm-lo-grpline);
-  border-left:3px solid var(--wm-lo-brand); border-radius:10px; overflow:hidden;
-  transition:opacity .15s, border-color .12s, box-shadow .12s; }
-.wm-lora-group:hover { border-color:rgba(155,138,245,.4); }
-.wm-lora-group.is-off { opacity:.5; }
-.wm-lora-group.dragging { opacity:.35; }
-.wm-lora-group.drop-target { box-shadow:inset 0 3px 0 0 var(--wm-lo-accent); }
-.wm-lora-group.drop-after { box-shadow:inset 0 -3px 0 0 var(--wm-lo-accent); }
-.wm-lora-group.drop-into { border-color:var(--wm-lo-accent); box-shadow:0 0 0 2px rgba(83,74,183,.3); }
-.wm-ghead { display:flex; align-items:center; gap:7px; padding:7px 9px;
-  background:rgba(83,74,183,.10); cursor:pointer; user-select:none; }
-.wm-ghead .wm-grip { opacity:.5; }
-.wm-gicon { flex:none; display:inline-flex; color:var(--wm-lo-accent); }
-.wm-gname { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-  font-size:12px; line-height:18px; font-weight:600; color:var(--wm-lo-fg); }
-.wm-gname-input { flex:1; min-width:0; background:var(--wm-lo-field); border:1px solid var(--wm-lo-accent);
-  border-radius:5px; padding:2px 6px; color:var(--wm-lo-fg); font-size:12px; line-height:16px;
-  font-weight:600; box-sizing:border-box; outline:none; }
-.wm-gcnt { flex:none; background:rgba(155,138,245,.18); color:var(--wm-lo-accent); border-radius:999px;
-  padding:1px 8px; font-size:11px; line-height:14px; font-weight:600; }
-.wm-chev { flex:none; color:var(--wm-lo-dim); font-size:10px; transition:transform .18s; }
-.wm-lora-group.closed .wm-chev { transform:rotate(-90deg); }
-.wm-gdel { flex:none; width:20px; height:20px; display:inline-flex; align-items:center; justify-content:center;
-  border-radius:5px; color:var(--wm-lo-dim); font-size:11px; cursor:pointer;
-  transition:background .12s, color .12s; }
-.wm-gdel:hover { background:rgba(229,115,115,.16); color:var(--wm-lo-danger); }
-.wm-gbody { display:grid; grid-template-rows:1fr; transition:grid-template-rows .2s ease; }
-.wm-lora-group.closed .wm-gbody { grid-template-rows:0fr; }
-.wm-gbodyin { overflow:hidden; }
-.wm-grows { padding:8px 8px 8px 14px; margin-left:8px; display:flex; flex-direction:column; gap:6px;
-  border-left:2px solid rgba(155,138,245,.3); }
-.wm-gempty { font-size:11px; line-height:15px; color:var(--wm-lo-dim); text-align:center; padding:6px 0;
-  border:1px dashed var(--wm-lo-accent); border-radius:7px; opacity:.7; }
-.wm-gadd { width:100%; background:transparent; border:1px dashed var(--wm-lo-accent); border-radius:7px;
-  padding:5px 0; color:var(--wm-lo-accent); font-size:11px; line-height:14px; font-weight:500;
-  cursor:pointer; transition:background .12s, border-color .12s; }
-.wm-gadd:hover { background:rgba(83,74,183,.14); border-color:var(--wm-lo-accent); }
+/* ---- 列表：固定高度 + 内滚动（节点高度与条目数解耦的关键） ---- */
+.wm2-list { flex:1 1 auto; min-height:0; box-sizing:border-box; height:${LIST_H}px; overflow-y:auto; overflow-x:hidden;
+  background:var(--wm-lo-panel2); border:1px solid var(--wm-lo-line); border-radius:9px; padding:0 5px 5px;
+  display:flex; flex-direction:column; gap:4px;
+  scrollbar-width:thin; scrollbar-color:var(--wm-lo-line2) transparent; }
+/* 列表是 flex column，子项必须 flex:none，否则配方组会被压扁裁切、滚不到底 */
+.wm2-list > * { flex:none; }
+.wm2-list::-webkit-scrollbar { width:10px; }
+.wm2-list::-webkit-scrollbar-thumb { background:var(--wm-lo-line2); border-radius:5px; border:2px solid transparent; background-clip:padding-box; }
+.wm2-list::-webkit-scrollbar-thumb:hover { background:var(--wm-lo-accent); background-clip:padding-box; }
+.wm2-list::-webkit-scrollbar-track { background:transparent; }
+.wm2-empty { text-align:center; padding:26px 8px; color:var(--wm-lo-dim); font-size:12px; font-style:italic; line-height:1.7; }
+.wm2-empty b { color:var(--wm-lo-accent); font-style:normal; }
 
-/* ---- 空状态 / 重名警告 / Add 按钮 ---- */
-.wm-lora-empty { border:1px dashed var(--wm-lo-accent); border-radius:10px; padding:16px 12px;
-  display:flex; flex-direction:column; align-items:center; gap:4px; color:var(--wm-lo-dim); }
-.wm-lora-empty b { font-size:12px; line-height:16px; color:var(--wm-lo-fg); }
-.wm-lora-empty span { font-size:11px; line-height:15px; }
-.wm-lora-empty svg { color:var(--wm-lo-accent); opacity:.85; margin-bottom:2px; }
-.wm-lora-warn { display:none; align-items:center; gap:7px; background:rgba(229,115,115,.10);
-  border:1px solid var(--wm-lo-danger); border-radius:8px; padding:6px 9px;
-  font-size:11px; line-height:15px; color:var(--wm-lo-danger); }
-.wm-lora-warn.show { display:flex; }
-.wm-lora-warn::before { content:''; flex:none; width:7px; height:7px; border-radius:50%; background:var(--wm-lo-danger); }
-.wm-lora-add { width:100%; background:transparent; border:1px dashed var(--wm-lo-accent); border-radius:8px;
-  padding:8px 0; color:var(--wm-lo-accent); font-size:12px; line-height:16px; font-weight:600;
-  cursor:pointer; transition:background .12s, border-color .12s; }
-.wm-lora-add:hover { background:rgba(83,74,183,.16); border-color:var(--wm-lo-accent); }
-.wm-lora-add:active { background:rgba(83,74,183,.26); }
+/* 表头 sticky：上边距写在表头自身并用负 margin 左右撑满，否则滚动内容会从上方缝隙露出来 */
+.wm2-lhead { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:8px;
+  margin:0 -5px; padding:5px 11px 7px; border-bottom:1px solid var(--wm-lo-line);
+  background:var(--wm-lo-panel2); cursor:ew-resize; user-select:none; }
+.wm2-lhead .tallob { display:inline-flex; align-items:center; gap:6px; font-size:11px; color:var(--wm-lo-dim); cursor:pointer; }
+.wm2-lhead .act { font-size:10.5px; color:var(--wm-lo-accent); font-weight:700; font-variant-numeric:tabular-nums; }
+.wm2-lhead .miss { font-size:10.5px; color:var(--wm-lo-danger); font-weight:700; }
+.wm2-lhead .slabel { margin-left:auto; display:inline-flex; align-items:center; gap:5px; font-size:11px; color:var(--wm-lo-dim); }
+.wm2-lhead .hint { opacity:.45; font-size:11px; transition:opacity .15s; }
+.wm2-lhead:hover .hint { opacity:1; }
 
-/* ---- 选 LoRA 弹窗（双列：左侧文件夹栏 + 右侧列表） ---- */
-.wm-chooser { position:fixed; z-index:10001; width:620px; max-width:92vw; max-height:62vh;
-  display:flex; flex-direction:column; overflow:hidden;
-  background:var(--wm-lo-panel); color:var(--wm-lo-fg);
-  border:1px solid var(--wm-lo-line); border-radius:12px;
-  box-shadow:var(--wm-lo-shadow); font-family:sans-serif; font-size:12px; }
-.wm-chooser-header { display:flex; align-items:center; gap:8px; flex:none;
-  padding:9px 12px; border-bottom:1px solid var(--wm-lo-line); }
-.wm-chooser-header::before { content:''; width:8px; height:8px; border-radius:50%; background:var(--wm-lo-accent); flex:none; }
-.wm-chooser-title { font-size:13px; font-weight:600; }
-.wm-chooser-close { cursor:pointer; color:var(--wm-lo-dim); margin-left:auto; padding:2px 6px; border-radius:6px;
-  transition:background .12s, color .12s; }
-.wm-chooser-close:hover { background:rgba(155,138,245,.16); color:var(--wm-lo-fg); }
-.wm-chooser-body { flex:1; min-height:0; display:flex; }
-.wm-chooser-side { flex:none; width:148px; overflow-y:auto; padding:6px;
-  border-right:1px solid var(--wm-lo-line); }
-.wm-chooser-side-item { display:flex; align-items:center; gap:6px; padding:6px 8px;
-  border-radius:7px; cursor:pointer; color:var(--wm-lo-fg);
-  transition:background .12s, color .12s; white-space:nowrap; }
-.wm-chooser-side-item:hover { background:rgba(83,74,183,.08); }
-.wm-chooser-side-item.active { background:rgba(83,74,183,.16); color:var(--wm-lo-accent); font-weight:600; }
-.wm-chooser-side-item .lbl { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; font-size:12px; }
-.wm-chooser-side-item .n { flex:none; font-size:10.5px; color:var(--wm-lo-dim);
-  background:var(--wm-lo-field); border:1px solid var(--wm-lo-line); border-radius:999px;
-  padding:0 6px; line-height:14px; }
-.wm-chooser-side-item.active .n { color:var(--wm-lo-accent); border-color:var(--wm-lo-accent); }
-.wm-chooser-main { flex:1; min-width:0; display:flex; flex-direction:column; }
-.wm-chooser-search { width:calc(100% - 16px); margin:8px; padding:6px 8px;
-  background:var(--wm-lo-field); color:var(--wm-lo-fg);
-  border:1px solid var(--wm-lo-line2); border-radius:7px; box-sizing:border-box;
-  font-size:12px; outline:none; transition:border-color .12s, box-shadow .12s; flex:none; }
-.wm-chooser-search:focus { border-color:var(--wm-lo-accent); box-shadow:0 0 0 2px rgba(155,138,245,.22); }
-.wm-chooser-list { flex:1; min-height:0; overflow-y:auto; padding:0 6px 6px; }
-.wm-chooser-item { position:relative; padding:8px 10px; border-radius:7px; cursor:pointer;
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-  transition:background .12s, color .12s; }
-.wm-chooser-item:hover { background:rgba(83,74,183,.12); box-shadow:inset 3px 0 0 0 var(--wm-lo-accent); }
-.wm-chooser-empty { padding:12px; color:var(--wm-lo-dim); }
-.wm-chooser-foot { flex:none; padding:7px 12px; border-top:1px solid var(--wm-lo-line);
-  font-size:11px; line-height:15px; color:var(--wm-lo-dim); }
+/* 方形对号勾选框 */
+.wm2-tgl { flex:none; width:15px; height:15px; border-radius:4px; border:1.5px solid var(--wm-lo-line2);
+  background:var(--wm-lo-field); position:relative; cursor:pointer; transition:background .12s, border-color .12s; }
+.wm2-tgl:hover { border-color:var(--wm-lo-accent); }
+.wm2-tgl.on { background:var(--wm-lo-brand); border-color:var(--wm-lo-brand); }
+.wm2-tgl.on::after { content:''; position:absolute; left:4px; top:1px; width:4px; height:8px;
+  border:solid #fff; border-width:0 2px 2px 0; transform:rotate(45deg); }
 
-/* ---- 文件夹树弹窗 ---- */
-.wm-folder-backdrop { position:fixed; left:0; top:0; width:100%; height:100%;
-  background:rgba(15,17,26,0.45); z-index:10000; display:flex; align-items:center; justify-content:center; }
-.wm-folder-dialog { background:var(--wm-lo-panel); color:var(--wm-lo-fg);
-  border-radius:12px; width:454px; max-width:92vw; max-height:86vh; display:flex; flex-direction:column;
-  font-family:sans-serif; box-shadow:var(--wm-lo-shadow); overflow:hidden; }
-.wm-folder-header { display:flex; align-items:center; gap:8px; justify-content:space-between;
-  padding:12px 16px; border-bottom:1px solid var(--wm-lo-line); }
-.wm-folder-title { font-size:14px; font-weight:600; display:flex; align-items:center; gap:8px; }
-.wm-folder-title::before { content:''; width:8px; height:8px; border-radius:50%; background:var(--wm-lo-accent); }
-.wm-folder-close { cursor:pointer; color:var(--wm-lo-dim); padding:2px 6px; border-radius:6px;
-  transition:background .12s, color .12s; }
-.wm-folder-close:hover { background:rgba(155,138,245,.16); color:var(--wm-lo-fg); }
-.wm-folder-toolbar { display:flex; gap:8px; padding:10px 16px; }
-.wm-folder-tree { padding:4px 16px; overflow-y:auto; max-height:60vh; }
-.wm-folder-row { display:flex; align-items:center; gap:6px; padding:4px 6px; border-radius:6px;
-  transition:background .12s; }
-.wm-folder-row:hover { background:rgba(83,74,183,.08); }
-.wm-folder-tri { cursor:pointer; color:var(--wm-lo-dim); width:10px; flex:none; transition:opacity .12s; }
-.wm-folder-tri:hover { opacity:1; color:var(--wm-lo-accent); }
-.wm-folder-cb { accent-color:var(--wm-lo-brand); cursor:pointer; flex:none; }
-.wm-folder-label { font-size:12px; cursor:default; }
-.wm-folder-cnt { font-size:11px; color:var(--wm-lo-dim); }
-.wm-folder-footer { display:flex; gap:8px; padding:12px 16px; border-top:1px solid var(--wm-lo-line);
-  justify-content:flex-end; }
+/* 卡片 = .wm2-wrap（行 + 展开的 tag 条），描边由它统一画，tag 展开时也会整块圈住 */
+.wm2-wrap { display:flex; flex-direction:column; border:1px solid transparent; border-radius:7px;
+  overflow:hidden; transition:border-color .12s; }
+.wm2-wrap:hover { border-color:var(--wm-lo-line); }
+.wm2-wrap.sel { border-color:var(--wm-lo-accent); }
+.wm2-wrap.miss { border-color:rgba(179,38,30,.45); }
+.wm2-row { display:flex; align-items:center; gap:6px; background:var(--wm-lo-panel);
+  padding:4px 6px;
+  transition:background .12s, opacity .15s; }
+.wm2-row:not(.off) { background:var(--wm-lo-row); }
+.wm2-row.off { opacity:.52; }
+.wm2-row.sel { background:var(--wm-lo-sel); }
+.wm2-row.miss { background:rgba(179,38,30,.10); }
+.wm2-row.miss .wm2-name { color:var(--wm-lo-danger); }
+.wm2-row.drag { opacity:.3; }
+.wm2-row.over-top { box-shadow:inset 0 2px 0 0 var(--wm-lo-accent); }
+.wm2-row.over-bot { box-shadow:inset 0 -2px 0 0 var(--wm-lo-accent); }
 
-/* ---- 通用按钮（弹窗内） ---- */
-.wm-btn { flex:1; padding:6px 0; font-size:12px; cursor:pointer;
-  background:var(--wm-lo-field); color:var(--wm-lo-fg);
-  border:1px solid var(--wm-lo-line2); border-radius:6px;
-  transition:border-color .12s, background .12s; font-family:sans-serif; }
-.wm-btn:hover { border-color:var(--wm-lo-accent); background:rgba(83,74,183,.08); }
-.wm-btn-primary { flex:0 0 auto; padding:6px 18px; background:var(--wm-lo-brand); color:#fff;
-  border:1px solid var(--wm-lo-brand); }
-.wm-btn-primary:hover { background:#3c3489; border-color:#3c3489; }
+/* 拖拽手柄：行只能从这里拖（整行可拖会抢走强度框的横向拖动） */
+.wm2-grip { flex:none; width:15px; height:22px; display:inline-flex; align-items:center; justify-content:center;
+  margin:0 -2px; color:var(--wm-lo-dim); opacity:.38; cursor:grab; border-radius:4px;
+  transition:opacity .12s, color .12s, background .12s; }
+.wm2-wrap:hover .wm2-grip { opacity:.9; }
+.wm2-grip:hover { color:var(--wm-lo-accent); background:var(--wm-lo-accent-soft); opacity:1; }
+.wm2-grip:active { cursor:grabbing; }
+.wm2-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  color:var(--wm-lo-fg); font-size:12px; line-height:20px; cursor:pointer; text-align:left; }
+.wm2-name:hover { color:var(--wm-lo-accent); text-decoration:underline; text-underline-offset:2px; }
+.wm2-name .ext { color:var(--wm-lo-dim); font-size:10.5px; }
+.wm2-name.miss .ext { color:var(--wm-lo-danger); opacity:.8; }
 
-/* ---- 模型预览浮窗 ---- */
-.wm-preview-pop { position:fixed; z-index:100002; max-width:308px; padding:6px;
-  background:var(--wm-lo-panel); border:1px solid var(--wm-lo-line2);
-  border-radius:8px; box-shadow:var(--wm-lo-shadow); pointer-events:none; }
-.wm-preview-pop img { display:block; max-width:296px; max-height:56vh; border-radius:5px; object-fit:contain; }
+.wm2-sv { flex:none; width:46px; height:21px; text-align:center; font-size:11.5px; font-weight:700;
+  font-variant-numeric:tabular-nums; color:var(--wm-lo-fg); border:1px solid var(--wm-lo-line2);
+  border-radius:5px; outline:none; cursor:ew-resize; font-family:inherit; padding:0 3px; transition:border-color .12s;
+  background:linear-gradient(var(--wm-lo-fill), var(--wm-lo-fill)) no-repeat 0 0 / var(--v,0%) 100%;
+  -moz-appearance:textfield; appearance:textfield; }
+.wm2-sv::-webkit-outer-spin-button, .wm2-sv::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
+.wm2-sv:hover { border-color:var(--wm-lo-accent); }
+.wm2-sv:focus { border-color:var(--wm-lo-accent); box-shadow:0 0 0 2px var(--wm-lo-accent-soft); background-color:var(--wm-lo-field); }
+.wm2-sv.rangeout { border-color:var(--wm-lo-warn); color:var(--wm-lo-warn); }
+.wm2-row.off .wm2-sv { --wm-lo-fill:transparent; color:var(--wm-lo-dim); font-weight:500; }
+
+.wm2-ico { flex:none; width:20px; height:20px; display:inline-flex; align-items:center; justify-content:center;
+  border:none; background:none; border-radius:4px; cursor:pointer; color:var(--wm-lo-dim); transition:background .12s, color .12s;
+  padding:0; box-sizing:border-box; line-height:1; font-size:12px; }   /* 浏览器给 button 的默认 padding 会把内芯挤扁（实测 17→8px）；line-height:1 让文字型 ✕ 也居中 */
+.wm2-ico:hover { background:var(--wm-lo-accent-soft); color:var(--wm-lo-accent); }
+/* tag / 删除这类小按钮：外框固定 20×20，内芯 15×15 */
+.wm2-ico > svg { width:15px; height:15px; display:block; flex:none; }
+.wm2-ico.tag-has { color:var(--wm-lo-param); background:var(--wm-lo-accent-soft); }
+.wm2-ico.tag-none { color:var(--wm-lo-dim); opacity:.5; }
+.wm2-ico.del:hover { background:rgba(179,38,30,.14); color:var(--wm-lo-danger); }
+
+/* tag 输入条是所在卡片的下半部分：底色跟行一致（勾选=--wm-lo-row，未勾选=--wm-lo-panel） */
+.wm2-tagedit { display:none; align-items:center; gap:6px; padding:4px 6px 4px 27px; margin:-2px 0 0;
+  background:var(--wm-lo-row); }
+.wm2-wrap.tagedit-open .wm2-tagedit { display:flex; }
+.wm2-wrap.off .wm2-tagedit { background:var(--wm-lo-panel); }
+.wm2-tagedit .key { flex:none; font-size:9.5px; font-weight:700; letter-spacing:.5px; color:var(--wm-lo-accent);
+  border:1px solid var(--wm-lo-accent); border-radius:4px; padding:1px 4px; opacity:.8; }
+.wm2-tagedit input { flex:1; min-width:0; background:var(--wm-lo-field); border:1px solid var(--wm-lo-line2);
+  border-radius:5px; padding:3px 6px; color:var(--wm-lo-fg); font-size:11.5px; outline:none; font-family:inherit; }
+.wm2-tagedit input:focus { border-color:var(--wm-lo-accent); }
+
+/* 配方组 */
+.wm2-grp { border:1px solid var(--wm-lo-line); border-radius:8px; overflow:hidden; background:var(--wm-lo-grpbg); }
+.wm2-grp.off { opacity:.52; }
+.wm2-grp.over { border-color:var(--wm-lo-accent); box-shadow:0 0 0 2px var(--wm-lo-accent-soft); }
+.wm2-grp.drag { opacity:.35; }
+.wm2-grp.over-top { box-shadow:inset 0 3px 0 0 var(--wm-lo-accent); }
+.wm2-grp.over-bot { box-shadow:inset 0 -3px 0 0 var(--wm-lo-accent); }
+.wm2-gh { display:flex; align-items:center; gap:6px; padding:5px 7px; background:var(--wm-lo-grphead);
+  cursor:grab; user-select:none; }
+.wm2-gh:active { cursor:grabbing; }
+.wm2-gh .chev { flex:none; color:var(--wm-lo-accent); display:inline-flex; transition:transform .15s; }
+.wm2-grp.closed .wm2-gh .chev { transform:rotate(-90deg); }
+.wm2-gh .fic { flex:none; color:var(--wm-lo-accent); display:inline-flex; }
+.wm2-gname { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font-weight:600; font-size:12px; color:var(--wm-lo-fg); }
+.wm2-gcnt { flex:none; background:var(--wm-lo-accent-soft); color:var(--wm-lo-accent); border-radius:999px;
+  padding:0 7px; font-size:10px; line-height:15px; font-weight:700; }
+.wm2-gbody { padding:5px 5px 6px; display:flex; flex-direction:column; gap:4px; }
+.wm2-grp.closed .wm2-gbody { display:none; }
+/* 空配方：给一块明显的落区，拖 LoRA 进来或点 Add LoRA */
+.wm2-grp.empty .wm2-gbody { min-height:62px; justify-content:center; align-items:stretch;
+  border:1px dashed var(--wm-lo-line2); border-radius:7px; margin:0 1px 1px; background:var(--wm-lo-panel2); }
+.wm2-grp.empty .wm2-gadd { align-self:center; }
+.wm2-ghint { text-align:center; font-size:10.5px; color:var(--wm-lo-dim); font-style:italic; line-height:1.6; }
+.wm2-gadd { align-self:flex-start; display:inline-flex; align-items:center; gap:4px; background:none;
+  border:1px dashed var(--wm-lo-line2); border-radius:6px; color:var(--wm-lo-dim); font-size:11px;
+  padding:3px 8px; cursor:pointer; font-family:inherit; }
+.wm2-gadd:hover { color:var(--wm-lo-accent); border-color:var(--wm-lo-accent); background:var(--wm-lo-accent-soft); }
+.wm2-rename { flex:1; min-width:0; background:var(--wm-lo-field); border:1px solid var(--wm-lo-accent);
+  border-radius:5px; padding:2px 6px; color:var(--wm-lo-fg); font-size:12px; font-weight:600; outline:none; font-family:inherit; }
+
+/* 提示条（重名 / 上限 / 已添加 N 个）：出现时列表自动让出高度，节点尺寸不变。
+   默认同系紫（--wm-lo-param），红色只留给真正的失败（.err 变体）。 */
+.wm2-warn { display:none; flex:none; font-size:11px; color:var(--wm-lo-param);
+  background:var(--wm-lo-accent-soft); border:1px solid var(--wm-lo-accent-soft);
+  border-radius:6px; padding:4px 7px; }
+.wm2-warn.err { color:var(--wm-lo-danger); }
+.wm2-warn.on { display:block; }
+
+/* 底部操作条：左正方形图标按钮 + 右 Add LoRA（两个按钮边框样式保持一致） */
+.wm2-addrow { display:flex; gap:6px; align-items:stretch; flex:none; height:31px; }
+.wm2-grpbtn { flex:none; width:32px; display:inline-flex; align-items:center; justify-content:center;
+  background:var(--wm-lo-field); border:1px solid var(--wm-lo-accent); border-radius:7px;
+  color:var(--wm-lo-accent); cursor:pointer; padding:0; }
+.wm2-grpbtn:hover { background:var(--wm-lo-accent-soft); }
+.wm2-addbtn { flex:1; min-width:0; border-radius:7px; cursor:pointer; font-size:12px; font-weight:600;
+  font-family:inherit; background:var(--wm-lo-field); color:var(--wm-lo-accent);
+  border:1px solid var(--wm-lo-accent); display:inline-flex; align-items:center; justify-content:center; gap:5px; }
+.wm2-addbtn:hover { background:var(--wm-lo-accent-soft); }
+
+/* 浏览弹窗 */
+.wm2-bd { position:fixed; inset:0; z-index:100013; background:rgba(0,0,0,.55);
+  display:none; align-items:center; justify-content:center; padding:20px; }
+.wm2-bd.open { display:flex; }
+.wm2-modal { width:560px; max-width:100%; max-height:80vh; display:flex; flex-direction:column; gap:10px;
+  background:var(--wm-lo-panel); border:1px solid var(--wm-lo-line2); border-radius:12px;
+  padding:14px; box-shadow:var(--wm-lo-shadow); color:var(--wm-lo-fg); }
+.wm2-modal h4 { margin:0; font-size:13px; font-weight:700; display:flex; align-items:center; gap:8px; }
+/* 关闭按钮：外框固定 22×22，× 用 flex 居中 + line-height:1（文字行框不对称，默认会偏下） */
+.wm2-modal h4 .x { margin-left:auto; flex:none; width:22px; height:22px; border-radius:6px; line-height:1;
+  display:inline-flex; align-items:center; justify-content:center; cursor:pointer; color:var(--wm-lo-dim); font-size:13px; }
+.wm2-modal h4 .x:hover { color:var(--wm-lo-danger); background:rgba(179,38,30,.12); }
+.wm2-msearch { display:flex; align-items:center; gap:8px; background:var(--wm-lo-field);
+  border:1px solid var(--wm-lo-line2); border-radius:8px; padding:6px 9px; color:var(--wm-lo-dim); }
+.wm2-msearch input { flex:1; min-width:0; background:none; border:none; outline:none; color:var(--wm-lo-fg);
+  font-size:12.5px; font-family:inherit; }
+.wm2-mbody { display:flex; gap:10px; min-height:0; flex:1; }
+.wm2-mside { flex:0 0 150px; display:flex; flex-direction:column; gap:2px; overflow:auto; scrollbar-width:thin; }
+.wm2-mside .f { padding:5px 9px; border-radius:7px; font-size:12px; color:var(--wm-lo-fg); cursor:pointer;
+  display:flex; align-items:center; gap:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.wm2-mside .f .n { margin-left:auto; font-size:10.5px; color:var(--wm-lo-dim); flex:none; }
+.wm2-mside .f:hover { background:var(--wm-lo-accent-soft); }
+.wm2-mside .f.on { background:var(--wm-lo-accent-soft); color:var(--wm-lo-accent); font-weight:600; }
+.wm2-mlist { flex:1; min-width:0; display:flex; flex-direction:column; gap:3px; overflow:auto;
+  border-left:1px solid var(--wm-lo-line); padding-left:10px; scrollbar-width:thin; }
+.wm2-mit { display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:7px; cursor:pointer;
+  border:1px solid transparent; }
+.wm2-mit:hover { background:var(--wm-lo-accent-soft); }
+.wm2-mit.on { background:var(--wm-lo-sel); border-color:var(--wm-lo-accent); }
+.wm2-mit.used { opacity:.45; cursor:default; }
+.wm2-mit .th { flex:none; width:26px; height:26px; border-radius:6px; overflow:hidden; display:inline-flex;
+  align-items:center; justify-content:center; font-size:10px; color:#dcd6ff; background:linear-gradient(135deg,#4a4380,#7a6cc0); }
+.wm2-mit .th img { width:100%; height:100%; object-fit:cover; }
+.wm2-mit .nm { flex:1; min-width:0; }
+.wm2-mit .nm .t { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; color:var(--wm-lo-fg); }
+.wm2-mit .tagu { flex:none; font-size:10px; color:var(--wm-lo-accent); background:var(--wm-lo-accent-soft);
+  border-radius:999px; padding:1px 7px; font-weight:600; }
+.wm2-mfoot .hint { font-size:11px; color:var(--wm-lo-dim); font-style:italic; }
+.wm2-mfoot { display:flex; align-items:center; gap:9px; }
+.wm2-mfoot .cnt { font-size:11.5px; color:var(--wm-lo-dim); }
+.wm2-mfoot .sp { flex:1; }
+.wm2-mfoot button { padding:6px 18px; border-radius:7px; cursor:pointer; font-size:12.5px; font-family:inherit;
+  background:none; color:var(--wm-lo-fg); border:1px solid var(--wm-lo-line2); }
+.wm2-mfoot button.ok { background:var(--wm-lo-brand); border-color:var(--wm-lo-brand); color:#fff; font-weight:600; }
+.wm2-mfoot button:disabled { opacity:.45; cursor:default; }
+
+/* 悬浮预览：只有一张图（3:4），不带文件名/路径等任何文字。
+   图没加载成功前不显示，避免弹出一块空黑框。 */
+.wm2-pv { position:fixed; z-index:100014; display:none; width:${PV_W}px; pointer-events:none; }  /* 现在会盖在列表上，必须穿透，否则抢走 hover 会一直闪 */
+.wm2-pv.open { display:block; }
+.wm2-pv .img { width:${PV_W}px; height:${PV_H}px; border-radius:10px; overflow:hidden;
+  box-shadow:var(--wm-lo-shadow); background:#101014; }
+.wm2-pv .img img { width:100%; height:100%; object-fit:cover; display:block; }
 `;
     document.head.append(s);
 }
 
-// 让节点根据 DOM 真实高度重新计算外框尺寸（Nodes 2.0 下外框不自动跟随 DOM 高度）。
-let _wmResizePending = new WeakSet();
-function scheduleResize(node) {
-    if (!node || _wmResizePending.has(node)) return;
-    _wmResizePending.add(node);
-    requestAnimationFrame(() => {
-        _wmResizePending.delete(node);
-        resizeNode(node);
-    });
-}
-function resizeNode(node) {
-    if (!node || typeof node.setSize !== "function" || typeof node.computeSize !== "function") return;
-    const sz = node.computeSize();
-    if (!Array.isArray(sz) || sz.length < 2 || !Number.isFinite(sz[1])) return;
-    const [w, h] = sz;
-    if (Math.abs((node.size?.[1] || 0) - h) < 0.5) return;
-    node.setSize([Math.max(node.size?.[0] || w, w), h]);
-    node.setDirtyCanvas?.(true, true);
-}
-function attachResizeObserver(node, el) {
-    if (!el || node.__wmRO) return;
-    const ro = new ResizeObserver(() => scheduleResize(node));
-    ro.observe(el);
-    node.__wmRO = ro;
-}
+//==============================================================================
+// 图标
+//==============================================================================
+export const IC = {
+    grip: `<svg width="9" height="15" viewBox="0 0 9 15" fill="currentColor"><circle cx="2" cy="2" r="1.4"/><circle cx="7" cy="2" r="1.4"/><circle cx="2" cy="7.5" r="1.4"/><circle cx="7" cy="7.5" r="1.4"/><circle cx="2" cy="13" r="1.4"/><circle cx="7" cy="13" r="1.4"/></svg>`,
+    chev: `<svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2.5 4.5 L6 8 L9.5 4.5"/></svg>`,
+    folder: `<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>`,
+    folderPlus: `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 4.5a1.5 1.5 0 0 1 1.5-1.5h3l1.6 1.8h5.4a1.5 1.5 0 0 1 1.5 1.5v5.7a1.5 1.5 0 0 1-1.5 1.5H3a1.5 1.5 0 0 1-1.5-1.5z"/><path d="M8 7.4v3.2M6.4 9h3.2"/></svg>`,
+    tag: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.83z"/><circle cx="7" cy="7" r="1.6"/></svg>`,
+    mag: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>`,
+};
 
 //==============================================================================
-// 拖拽排序：手柄可拖，行/组/组内行互相调序；行可拖入配方组（释放到组头或组卡空白处）。
-// dragstart 数据：wm-reorder:{nodeId}:{srcPath}；同节点校验防跨节点串位。
+// body 级浮层：候选下拉 / 悬停预览（单例）
 //==============================================================================
-const GRIP_SVG = `<svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><circle cx="2.5" cy="3" r="1.6"/><circle cx="7.5" cy="3" r="1.6"/><circle cx="2.5" cy="8" r="1.6"/><circle cx="7.5" cy="8" r="1.6"/><circle cx="2.5" cy="13" r="1.6"/><circle cx="7.5" cy="13" r="1.6"/></svg>`;
-const FOLDER_PLUS_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M12 10v6M9 13h6"/></svg>`;
-const FOLDER_FILL_SVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>`;
-const TAG_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.83z"/><circle cx="7" cy="7" r="1.5"/></svg>`;
-const EMPTY_SVG = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="14" height="12" rx="2"/><path d="M7 3h12a2 2 0 0 1 2 2v10"/><path d="M7 10h6M7 14h4"/></svg>`;
-
-let _dragSrc = null; // { nodeId, pathStr } —— dragover 期间用于判断源类型（行/组/组内行）
-
-function clearDragMarks() {
-    document.querySelectorAll(".drop-target,.drop-after,.drop-into").forEach((el) =>
-        el.classList.remove("drop-target", "drop-after", "drop-into")
-    );
+let _ac = null, _acNode = null, _acItems = [], _acIdx = 0;
+function getAc() {
+    if (!_ac) {
+        _ac = document.createElement("div");
+        _ac.className = "wm2-ac";
+// 只拦 .it 的默认行为：保住焦点方便连续添加，同时不吃掉滚动条
+        _ac.addEventListener("mousedown", (e) => { if (e.target.closest(".it")) e.preventDefault(); });
+        _ac.addEventListener("click", (e) => {
+            const it = e.target.closest(".it");
+            if (!it || !_acNode) return;
+            pickAcItem(_acNode, it.dataset.p);
+        });
+        // 鼠标划过候选项 = 高亮那条（和 ↑↓ 的视觉保持一致）
+        _ac.addEventListener("mouseover", (e) => {
+            const it = e.target.closest(".it");
+            if (!it) return;
+            _ac.querySelectorAll(".it.hi").forEach((x) => x.classList.remove("hi"));
+            it.classList.add("hi");
+        });
+        document.body.append(_ac);
+    }
+    return _ac;
 }
-function isDragEvt(e) {
-    const types = Array.from((e.dataTransfer && e.dataTransfer.types) || []);
-    return !types.includes("Files") && types.includes("text/plain");
+function closeAc() {
+    if (_ac) _ac.classList.remove("open");
+    _acNode = null;
 }
-
-function makeGrip(node, srcPath, hostEl) {
-    const grip = document.createElement("div");
-    grip.className = "wm-grip";
-    grip.title = "拖动调整顺序";
-    grip.innerHTML = GRIP_SVG;
-    grip.draggable = true;
-    grip.addEventListener("dragstart", (e) => {
-        e.dataTransfer.setData("text/plain", `wm-reorder:${node.id}:${srcPath}`);
-        e.dataTransfer.effectAllowed = "move";
-        _dragSrc = { nodeId: node.id, pathStr: srcPath };
-        (hostEl || grip.closest(".wm-lora-row,.wm-lora-group"))?.classList.add("dragging");
-    });
-    grip.addEventListener("dragend", () => {
-        _dragSrc = null;
-        clearDragMarks();
-        document.querySelectorAll(".dragging").forEach((el) => el.classList.remove("dragging"));
-    });
-    return grip;
+// 下拉只重新贴合、绝不关闭；宽度和缩放跟着节点走
+function positionAc() {
+    if (!_ac || !_acNode) return;
+    const anchor = _acNode.__wm2Search || _acNode.__wm2SearchInput;
+    if (!anchor?.getBoundingClientRect) return;
+    const r = anchor.getBoundingClientRect();
+    const k = canvasScale(_acNode) || 1;
+    const cont = _acNode.__wm2Container;
+    let w = NaN;
+    if (cont) w = cont.getBoundingClientRect().width / k;          // 逻辑宽度 = 节点内部宽度
+    if (!Number.isFinite(w) || w < 160) w = Math.max(240, Math.round(r.width / k));
+    _ac.style.width = Math.round(w) + "px";
+    _ac.style.transform = `scale(${k})`;
+    _ac.style.transformOrigin = "top left";
+    _ac.style.left = Math.max(6, Math.min(r.left, window.innerWidth - 40)) + "px";
+    _ac.style.top = r.bottom + 5 * k + "px";
 }
-
-// 行卡 drop：上半区插到目标行前，下半区插到目标行后（同容器排序 / 跨容器移动）
-function bindRowDrop(row, node, pathStr) {
-    row.addEventListener("dragover", (e) => {
-        if (!isDragEvt(e)) return;
-        e.preventDefault();
-        e.stopPropagation();
-        row.classList.toggle("drop-after", (e.clientY - row.getBoundingClientRect().top) > row.offsetHeight / 2);
-        row.classList.add("drop-target");
-    });
-    row.addEventListener("dragleave", () => row.classList.remove("drop-target", "drop-after"));
-    row.addEventListener("drop", (e) => {
-        if (!isDragEvt(e)) return;
-        e.preventDefault();
-        e.stopPropagation();
-        const after = row.classList.contains("drop-after"); // 先读再清，remove 会抹掉状态
-        row.classList.remove("drop-target", "drop-after");
-        const raw = e.dataTransfer.getData("text/plain");
-        const parts = String(raw).split(":");
-        if (parts[0] !== "wm-reorder" || String(node.id) !== parts[1]) return;
-        const src = pathParts(parts.slice(2).join(":"));
-        const dst = pathParts(pathStr);
-        if (!src || !dst) return;
-        const item = peekItem(node, src);
-        if (!item || item === peekItem(node, dst)) return;
-        // 顶层重名校验：任何会让顶层出现同名的移动都拦截（配方内允许同名）
-        if (dst.k === "top" && !item.folder && topNameConflict(node, item)) {
-            showWarn(node, `顶层已存在同名：${basename(item.name)}（配方内外不受此限制）`);
-            return;
-        }
-        removeItem(node, src);
-        _dragSrc = null;
-        clearDragMarks();
-        const stack = node.__loraStack;
-        if (dst.k === "top") {
-            let at = dst.i;
-            if (src.k === "top" && src.i < dst.i) at -= 1;
-            if (after) at += 1;
-            stack.splice(Math.max(0, Math.min(at, stack.length)), 0, item);
-        } else {
-            const g = stack[dst.g]?.loras;
-            if (!g) return;
-            let at = dst.i;
-            if (src.k === "grow" && src.g === dst.g && src.i < dst.i) at -= 1;
-            if (after) at += 1;
-            g.splice(Math.max(0, Math.min(at, g.length)), 0, item);
-        }
-        syncData(node);
-        renderRows(node);
-    });
+function acMatches(node) {
+    const kw = (node.__wm2Kw || "").trim().toLowerCase();
+    const used = usedTopPaths(node);      // 只屏蔽顶层已有的；配方里用过的照样能快添到外面
+    let items = (node.__wm2All || []).filter((p) => !used.has(norm(p)));
+    if (kw) items = items.filter((p) => norm(p).toLowerCase().includes(kw) || stemOf(baseOf(p)).toLowerCase().includes(kw));
+    const folds = new Map();
+    items.forEach((p) => { const d = dirOf(p); if (!folds.has(d)) folds.set(d, []); folds.get(d).push(p); });
+    return [...folds.entries()];
 }
-
-// 组卡 drop：行拖入 → 加入组末尾；组拖动 → 上下半区定插入前后
-function bindGroupDrop(grp, node, gi) {
-    grp.addEventListener("dragover", (e) => {
-        if (!isDragEvt(e)) return;
-        e.preventDefault();
-        e.stopPropagation();
-        if (_dragSrc && _dragSrc.nodeId === node.id && _dragSrc.pathStr && pathParts(_dragSrc.pathStr)?.k !== "grp") {
-            grp.classList.add("drop-into");
-        } else {
-            grp.classList.toggle("drop-after", (e.clientY - grp.getBoundingClientRect().top) > grp.offsetHeight / 2);
-            grp.classList.add("drop-target");
-        }
+export function hlName(name, kw) {
+    const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    if (!kw) return esc(name);
+    const i = name.toLowerCase().indexOf(kw.toLowerCase());
+    if (i < 0) return esc(name);
+    return esc(name.slice(0, i)) + "<mark>" + esc(name.slice(i, i + kw.length)) + "</mark>" + esc(name.slice(i + kw.length));
+}
+function renderAc(node, anchor) {
+    const ac = getAc();
+    _acNode = node;
+    const kw = (node.__wm2Kw || "").trim();
+    const groups = acMatches(node);
+    _acItems = [];
+    let html = "";
+    groups.forEach(([f, list]) => {
+        html += `<div class="fold">${IC.folder} ${f ? f.replace(/&/g, "&amp;") : "根目录"}</div>`;
+        list.forEach((p) => {
+            if (_acItems.length >= 20) return;
+            const idx = _acItems.push(p) - 1;
+            html += `<div class="it${idx === _acIdx ? " hi" : ""}" data-p="${p.replace(/"/g, "&quot;")}">
+              <span class="th">${stemOf(baseOf(p)).slice(0, 2).toUpperCase()}</span>
+              <span class="nm">${hlName(stemOf(baseOf(p)), kw)}</span>
+            </div>`;
+        });
     });
-    grp.addEventListener("dragleave", () => grp.classList.remove("drop-target", "drop-after", "drop-into"));
-    grp.addEventListener("drop", (e) => {
-        if (!isDragEvt(e)) return;
-        e.preventDefault();
-        e.stopPropagation();
-        const after = grp.classList.contains("drop-after"); // 先读再清
-        grp.classList.remove("drop-target", "drop-after", "drop-into");
-        const raw = e.dataTransfer.getData("text/plain");
-        const parts = String(raw).split(":");
-        if (parts[0] !== "wm-reorder" || String(node.id) !== parts[1]) return;
-        const src = pathParts(parts.slice(2).join(":"));
-        if (!src) return;
-        const item = peekItem(node, src);
-        const stack = node.__loraStack;
-        const g = stack[gi]?.loras;
-        if (!item || !g) return;
-        if (item.folder) {
-            // 组拖到组头/组卡 → 组排序（上下半区）
-            if (src.k !== "grp") return;
-            removeItem(node, src);
-            _dragSrc = null;
-            clearDragMarks();
-            let at = gi;
-            if (src.i < gi) at -= 1;
-            if (after) at += 1;
-            stack.splice(Math.max(0, Math.min(at, stack.length)), 0, item);
-        } else {
-            // 行拖到组上 → 移入该配方末尾
-            removeItem(node, src);
-            _dragSrc = null;
-            clearDragMarks();
-            g.push(item);
-        }
-        syncData(node);
-        renderRows(node);
-    });
+    if (!_acItems.length) html = `<div class="none">${node.__wm2Kw ? "无匹配结果（已添加的不再出现）" : "库里没有可选的 LoRA"}</div>`;
+    else html += `<div class="foot"><span>↑↓ 选择</span><span>Enter 添加</span><span>Esc 收起</span><span style="margin-left:auto">最多 20 条</span></div>`;
+    ac.innerHTML = html;
+    positionAc();
+    ac.classList.add("open");
+}
+function acMove(d) {
+    if (!_acItems.length) return;
+    _acIdx = Math.max(0, Math.min(_acIdx + d, _acItems.length - 1));
+    if (_acNode) renderAc(_acNode, _acNode.__wm2SearchInput);
+}
+// 从候选里选定一条：清搜索框 → 加行 → 收起下拉
+function pickAcItem(node, path) {
+    if (!path) return;
+    node.__wm2Kw = "";
+    if (node.__wm2SearchInput) node.__wm2SearchInput.value = "";
+    node.__wm2Search?.classList.remove("has-q");
+    addEntry(node, path, -1);
+    closeAc();
 }
 
-// 顶层容器 drop：行/组拖到列表空白处 → 移到顶层末尾
-function bindTopDrop(rowsEl, node) {
-    rowsEl.addEventListener("dragover", (e) => {
-        if (!isDragEvt(e)) return;
-        e.preventDefault();
-    });
-    rowsEl.addEventListener("drop", (e) => {
-        if (!isDragEvt(e)) return;
-        e.preventDefault();
-        clearDragMarks();
-        const raw = e.dataTransfer.getData("text/plain");
-        const parts = String(raw).split(":");
-        if (parts[0] !== "wm-reorder" || String(node.id) !== parts[1]) return;
-        const src = pathParts(parts.slice(2).join(":"));
-        if (!src) return;
-        const item = peekItem(node, src);
-        if (!item) return;
-        if (!item.folder && topNameConflict(node, item)) {
-            showWarn(node, `顶层已存在同名：${basename(item.name)}（配方内外不受此限制）`);
-            return;
-        }
-        removeItem(node, src);
-        node.__loraStack.push(item);
-        syncData(node);
-        renderRows(node);
-    });
+// 悬停预览：只有图片本体，加载成功才弹出；鼠标移走立即取消（含还在加载中的那张）
+let _tagCache = new Map();        // path → trainedWords，tag 自动填充/回填用
+let _pv = null, _pvTimer = null, _pvToken = 0;
+function getPv() {
+    if (!_pv) {
+        _pv = document.createElement("div");
+        _pv.className = "wm2-pv";
+        _pv.innerHTML = `<div class="img"></div>`;
+        document.body.append(_pv);
+    }
+    return _pv;
+}
+function positionPv(anchor) {
+    const pv = getPv();
+    const r = anchor.getBoundingClientRect();
+    const GAP = 10;
+// 与行级预览同一套定位；弹窗内整张收进窗口内部
+    let left = r.right + GAP;
+    const modalEl = anchor.closest(".wm2-modal");
+    if (modalEl) {
+        const mr = modalEl.getBoundingClientRect();
+        const fit = mr.right - PV_W - 8;                     // 能整个塞进弹窗就贴着右内壁
+        if (left > fit && fit >= mr.left + 8) left = fit;
+        else if (left + PV_W > window.innerWidth - 8) left = r.left - PV_W - GAP;
+    } else if (left + PV_W > window.innerWidth - 8) {
+        left = r.left - PV_W - GAP;                          // 右边放不下就翻到左边
+    }
+    left = Math.max(8, Math.min(left, window.innerWidth - PV_W - 8));
+    pv.style.left = left + "px";
+    pv.style.top = Math.max(8, Math.min(r.top - 10, window.innerHeight - PV_H - 8)) + "px";
+}
+function showPv(name, anchor) {
+    if (!name || !anchor?.getBoundingClientRect) return;
+    const token = ++_pvToken;
+    const box = document.createElement("img");
+    box.onload = () => {
+        if (token !== _pvToken) return;            // 等待期间鼠标已经移走
+        const pv = getPv();
+        const img = pv.querySelector(".img");
+        img.innerHTML = "";
+        img.append(box);
+        positionPv(anchor);
+        pv.classList.add("open");
+    };
+    box.onerror = () => { if (token === _pvToken) hidePv(); };
+    box.src = previewUrl(name);
+}
+function hidePv() {
+    clearTimeout(_pvTimer);
+    _pvToken += 1;
+    if (_pv) _pv.classList.remove("open");
 }
 
 //==============================================================================
 // 渲染
 //==============================================================================
-function showWarn(node, msg) {
-    const el = node.__wmWarnEl;
-    if (!el) return;
-    el.textContent = msg;
-    el.classList.add("show");
-    if (node.__wmWarnTimer) clearTimeout(node.__wmWarnTimer);
-    node.__wmWarnTimer = setTimeout(() => el.classList.remove("show"), 2600);
+function makeToggle(on, onclick, title) {
+    const t = document.createElement("span");
+    t.className = "wm2-tgl" + (on ? " on" : "");
+    t.title = title || (on ? "已启用" : "已停用");
+    t.onclick = (e) => { e.stopPropagation(); onclick(); };
+    return t;
 }
 
-// 选完 LoRA 后统一处理：写 name、自动拉 tag、自动展开 tag 区
-function applyChosenPath(node, entry, path) {
-    entry.name = path;
-    syncData(node);
-    renderRows(node);
-    fetchTag(path).then((tag) => {
-        entry.tag = tag;
-        entry.__tagOpen = false; // 自动折叠：有 tag 只显示预览
+function makeStrength(node, entry) {
+    const inp = document.createElement("input");
+    inp.className = "wm2-sv";
+    inp.type = "number";
+    inp.step = "0.05";
+    inp.value = entry.model.toFixed(2);
+    const paint = () => {
+        inp.value = entry.model.toFixed(2);
+        inp.style.setProperty("--v", Math.max(0, Math.min(100, (Math.abs(entry.model) / 2) * 100)) + "%");
+    };
+    paint();
+    // 横向拖动改强度：0.001/px，Shift=×10，Alt=×0.1；4px 阈值内不当作拖动
+    inp.addEventListener("pointerdown", (ev) => {
+        if (ev.button !== 0) return;
+        ev.stopPropagation();
+        const sx = ev.clientX, sv = entry.model;
+        let moved = false;
+        const mv = (m) => {
+            const dx = m.clientX - sx;
+            if (!moved && Math.abs(dx) < 4) return;
+            moved = true;
+            const mult = m.shiftKey ? 10 : m.altKey ? 0.1 : 1;
+            entry.model = clampStep(Math.max(-10, Math.min(10, sv + dx * 0.001 * mult)));
+            paint();
+        };
+        const up = () => {
+            document.removeEventListener("pointermove", mv);
+            document.removeEventListener("pointerup", up);
+            if (moved) { syncData(node); renderRows(node, true); }
+        };
+        document.addEventListener("pointermove", mv);
+        document.addEventListener("pointerup", up);
+    });
+    inp.addEventListener("input", () => {
+        const v = parseFloat(inp.value);
+        if (Number.isFinite(v)) { entry.model = v; syncData(node); paint(); }
+    });
+    inp.addEventListener("blur", () => {
+        let v = parseFloat(inp.value);
+        if (!Number.isFinite(v)) v = DEF_STRENGTH;
+        entry.model = Math.max(-10, Math.min(10, v));
         syncData(node);
-        renderRows(node);
+        paint();
+    });
+    inp.addEventListener("keydown", (ev) => {
+        ev.stopPropagation();
+        if (ev.key === "Enter") inp.blur();
+    });
+    inp.addEventListener("click", (ev) => ev.stopPropagation());
+    inp.title = "横向拖动改强度（Shift 粗调 / Alt 微调）· 点击输入精确值";
+    return inp;
+}
+
+function makeRow(node, entry, gi) {
+    const wrap = document.createElement("div");
+    const missing = entry.name && node.__wm2Known && !node.__wm2Known.has(norm(entry.name));
+    // 卡片状态同时挂在 wrap 上：描边由 wrap 画，才能把展开的 tag 条一起圈住
+    wrap.className = "wm2-wrap" + (entry.on ? "" : " off") + (missing ? " miss" : "") +
+        (node.__wm2Sel === norm(entry.name) ? " sel" : "") +
+        (node.__wm2TagOpen?.has(norm(entry.name)) ? " tagedit-open" : "");
+    wrap.dataset.name = entry.name;
+
+    const row = document.createElement("div");
+    row.className = "wm2-row" + (entry.on ? "" : " off") + (missing ? " miss" : "") +
+        (node.__wm2Sel === norm(entry.name) ? " sel" : "");
+    wrap.append(row);
+
+    // 只有这个手柄能拖：整行可拖会和强度框的横向拖动抢鼠标
+    const grip = document.createElement("span");
+    grip.className = "wm2-grip";
+    grip.innerHTML = IC.grip;
+    grip.title = "拖动排序 / 拖进配方";
+    grip.draggable = true;
+    grip.addEventListener("dragstart", (e) => {
+        e.stopPropagation();
+        node.__wm2Drag = { kind: "row", name: entry.name };
+        node.__wm2Sel = norm(entry.name);
+        row.classList.add("drag");
+        try { e.dataTransfer.setData("text/plain", `wm2:${node.id}:row`); } catch (err) {}
+        e.dataTransfer.effectAllowed = "move";
+        try { e.dataTransfer.setDragImage(row, 16, 12); } catch (err) {}
+    });
+    grip.addEventListener("dragend", () => { node.__wm2Drag = null; clearMarks(node); renderRows(node, true); });
+    row.append(grip);
+
+    row.append(makeToggle(entry.on, () => {
+        entry.on = !entry.on;
+        syncData(node);
+        renderRows(node, true);
+    }));
+
+    const name = document.createElement("span");
+    name.className = "wm2-name" + (missing ? " miss" : "");
+    const stemSpan = document.createElement("span");
+    stemSpan.textContent = stemOf(baseOf(entry.name || ""));     // 只显示文件名，不带目录
+    name.append(stemSpan);
+    const ext = extOf(entry.name || "");
+    if (ext) { const s = document.createElement("span"); s.className = "ext"; s.textContent = ext; name.append(s); }
+    name.title = (entry.name || "未选择 LoRA") + "\n点击重新选择其他 LoRA";
+    // 点名字 = 换这一个 LoRA（弹窗单选，只换路径，强度/tag 保留）
+    name.onclick = (e) => {
+        e.stopPropagation();
+        node.__wm2Sel = norm(entry.name);
+        openModal(node, gi, { replace: entry });
+    };
+    name.addEventListener("mouseenter", () => {
+        if (!entry.name) return;
+        clearTimeout(_pvTimer);
+        _pvTimer = setTimeout(() => showPv(entry.name, name), 400);
+    });
+    name.addEventListener("mouseleave", hidePv);
+    row.append(name);
+
+    row.append(makeStrength(node, entry));
+
+    const tagBtn = document.createElement("button");
+    tagBtn.type = "button";
+    tagBtn.className = "wm2-ico " + (entry.tag ? "tag-has" : "tag-none");
+    tagBtn.innerHTML = IC.tag;
+    tagBtn.title = entry.tag ? "编辑 tag：" + entry.tag : "添加 tag";
+    tagBtn.onclick = (e) => {
+        e.stopPropagation();
+        const k = norm(entry.name);
+        if (node.__wm2TagOpen.has(k)) node.__wm2TagOpen.delete(k); else node.__wm2TagOpen.add(k);
+        // 只做「展开文本框」，不自动抢焦点：想改字自己点进去，避免误触把已有 tag 选瞎
+        renderRows(node, true);
+    };
+    row.append(tagBtn);
+
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "wm2-ico del";
+    del.textContent = "✕";
+    del.title = "删除";
+    del.onclick = (e) => {
+        e.stopPropagation();
+        removeRow(node, entry.name);
+        if (node.__wm2Sel === norm(entry.name)) node.__wm2Sel = null;
+        syncData(node);
+        renderRows(node, true);
+    };
+    row.append(del);
+
+    const tagBox = document.createElement("div");
+    tagBox.className = "wm2-tagedit";
+    const key = document.createElement("span");
+    key.className = "key";
+    key.textContent = "TAG";
+    const inp = document.createElement("input");
+    inp.type = "text";
+    inp.placeholder = "触发词 / 说明，逗号分隔";
+    inp.value = entry.tag || "";
+    inp.oninput = () => { entry.tag = inp.value.trim(); syncData(node); tagBtn.className = "wm2-ico " + (entry.tag ? "tag-has" : "tag-none"); tagBtn.title = entry.tag ? "编辑 tag：" + entry.tag : "添加 tag"; };
+    inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") inp.blur(); };
+    inp.onblur = () => { node.__wm2TagOpen.delete(norm(entry.name)); renderRows(node, true); };
+    tagBox.append(key, inp);
+    wrap.append(tagBox);
+
+    // 拖放的落点仍在整行上（手柄拖起来，往哪放看这一行的上下半区）
+    row.addEventListener("dragover", (e) => {
+        const dg = node.__wm2Drag;
+        if (!dg || (dg.kind === "row" && norm(dg.name) === norm(entry.name))) return;
+        e.preventDefault(); e.stopPropagation();
+        e.dataTransfer.dropEffect = "move";
+        clearMarks(node);
+        const r = row.getBoundingClientRect();
+        row.classList.add(e.clientY > r.top + r.height / 2 ? "over-bot" : "over-top");
+    });
+    row.addEventListener("drop", (e) => {
+        const dg = node.__wm2Drag;
+        if (!dg || (dg.kind === "row" && norm(dg.name) === norm(entry.name))) return;
+        e.preventDefault(); e.stopPropagation();
+        const r = row.getBoundingClientRect();
+        const after = e.clientY > r.top + r.height / 2;
+        if (dg.kind === "row") moveRow(node, dg.name, entry.name, after);
+        // 组只能插在「顶层行」前后；落在组内行上就忽略（避免拿组内下标当顶层下标）
+        else if (dg.kind === "group") {
+            const ti = node.__wm2Stack.indexOf(entry);
+            if (ti >= 0) moveGroup(node, dg.gi, ti + (after ? 1 : 0));
+        }
+        clearMarks(node);
+        syncData(node);
+        renderRows(node, true);
+    });
+
+    return wrap;
+}
+
+function clearMarks(node) {
+    (node.__wm2Container?.querySelectorAll(".over-top,.over-bot,.drag,.over") || []).forEach((x) => {
+        x.classList.remove("over-top", "over-bot", "drag", "over");
     });
 }
 
-function renderRowCard(node, entry, dropPath) {
-    const row = document.createElement("div");
-    row.className = "wm-lora-row" + (entry.on ? "" : " is-off");
-    row.dataset.drop = dropPath;
-
-    const main = document.createElement("div");
-    main.className = "wm-lora-main";
-    row.append(main);
-
-    main.append(makeGrip(node, dropPath, row));
-
-    const on = document.createElement("input");
-    on.type = "checkbox";
-    on.className = "wm-on";
-    on.checked = !!entry.on;
-    on.title = "启用 / 停用";
-    on.onchange = () => {
-        entry.on = on.checked;
-        row.classList.toggle("is-off", !entry.on);
-        syncData(node);
-    };
-    main.append(on);
-
-    const name = document.createElement("span");
-    name.className = "wm-name";
-    name.textContent = entry.name ? basename(entry.name) : "（点击选择 LoRA）";
-    name.title = entry.name || "点击选择 LoRA";
-    name.onclick = () => {
-        showChooser(node, (path) => {
-            const p = pathParts(dropPath);
-            // 顶层行换名时同样遵守顶层唯一规则
-            if (p?.k === "top" && norm(entry.name || "") !== norm(path)) {
-                const probe = { name: path };
-                const conflict = (node.__loraStack || []).some(
-                    (e) => !e.folder && e !== entry && norm(e.name || "") === norm(path)
-                );
-                if (conflict) {
-                    showWarn(node, `顶层已存在同名：${basename(path)}（配方内外不受此限制）`);
-                    return false;
-                }
-            }
-            applyChosenPath(node, entry, path);
-        });
-    };
-    if (entry.name) {
-        name.addEventListener("mouseenter", (e) => showPreviewPop(entry.name, e));
-        name.addEventListener("mousemove", movePreviewPop);
-        name.addEventListener("mouseleave", hidePreviewPop);
-    }
-    main.append(name);
-
-    const strength = document.createElement("input");
-    strength.type = "number";
-    strength.step = "0.05";
-    strength.className = "wm-strength";
-    strength.value = entry.model;
-    strength.oninput = () => {
-        let v = parseFloat(strength.value);
-        if (!Number.isFinite(v)) v = DEF_STRENGTH;
-        entry.model = v;
-        syncData(node);
-    };
-    main.append(strength);
-
-    const tagIc = document.createElement("span");
-    tagIc.className = "wm-ic " + (entry.tag ? "has" : "none");
-    tagIc.title = "展开 / 收起 tag";
-    tagIc.innerHTML = TAG_SVG;
-    main.append(tagIc);
-
-    const del = document.createElement("span");
-    del.className = "wm-del";
-    del.textContent = "✕";
-    del.title = "删除";
-    del.onclick = () => {
-        removeItem(node, pathParts(dropPath));
-        syncData(node);
-        renderRows(node);
-    };
-    main.append(del);
-
-    // tag 区：展开 = 编辑框；收起且有 tag = 预览小字；收起且无 tag = 零占位
-    const zone = document.createElement("div");
-    zone.className = "wm-tagzone";
-    const inner = document.createElement("div");
-    inner.className = "wm-taginner";
-    zone.append(inner);
-    row.append(zone);
-
-    const refreshTagIcon = () => {
-        tagIc.className = "wm-ic " + (entry.tag ? "has" : "none");
-    };
-
-    const renderTagZone = () => {
-        inner.innerHTML = "";
-        if (entry.__tagOpen) {
-            const box = document.createElement("div");
-            box.className = "wm-tagbox";
-            const key = document.createElement("span");
-            key.className = "wm-tagkey";
-            key.textContent = "TAG";
-            const input = document.createElement("input");
-            input.type = "text";
-            input.placeholder = "tag（选 LoRA 后自动填充，可编辑）";
-            input.value = entry.tag || "";
-            input.oninput = () => { entry.tag = input.value; syncData(node); refreshTagIcon(); };
-            box.append(key, input);
-            inner.append(box);
-        } else if (entry.tag) {
-            const prev = document.createElement("div");
-            prev.className = "wm-tagprev";
-            prev.innerHTML = `${TAG_SVG}<span></span><span class="wm-tarr">▾</span>`;
-            prev.querySelector("span").textContent = entry.tag;
-            prev.title = entry.tag;
-            prev.onclick = () => { entry.__tagOpen = true; renderTagZone(); scheduleResize(node); };
-            inner.append(prev);
-        }
-    };
-    renderTagZone();
-
-    tagIc.onclick = () => {
-        entry.__tagOpen = !entry.__tagOpen;
-        renderTagZone();
-        scheduleResize(node);
-    };
-
-    bindRowDrop(row, node, dropPath);
-    return row;
-}
-
-function renderGroup(node, entry, gi) {
+function makeGroup(node, g, gi) {
+    const empty = !(g.loras || []).length;
     const grp = document.createElement("div");
-    grp.className = "wm-lora-group" + (entry.open === false ? " closed" : "") + (entry.on ? "" : " is-off");
+    grp.className = "wm2-grp" + (g.on ? "" : " off") + (g.open === false ? " closed" : "") + (empty ? " empty" : "");
 
     const head = document.createElement("div");
-    head.className = "wm-ghead";
-    head.append(makeGrip(node, "g" + gi, grp));
+    head.className = "wm2-gh";
+    grp.append(head);
 
-    const on = document.createElement("input");
-    on.type = "checkbox";
-    on.className = "wm-on";
-    on.checked = !!entry.on;
-    on.title = "整组开关";
-    on.onchange = () => {
-        entry.on = on.checked;
-        grp.classList.toggle("is-off", !entry.on);
-        syncData(node);
-    };
-    head.append(on);
+    const chev = document.createElement("span");
+    chev.className = "chev";
+    chev.innerHTML = IC.chev;
+    head.append(chev);
 
-    const icon = document.createElement("span");
-    icon.className = "wm-gicon";
-    icon.innerHTML = FOLDER_FILL_SVG;
-    head.append(icon);
+    // 整组开关放在最前，与最右的删除按钮隔开，避免误删
+    head.append(makeToggle(g.on, () => { g.on = !g.on; syncData(node); renderRows(node, true); }, g.on ? "整组启用" : "整组停用"));
+
+    const fic = document.createElement("span");
+    fic.className = "fic";
+    fic.innerHTML = IC.folder;
+    head.append(fic);
 
     const gname = document.createElement("span");
-    gname.className = "wm-gname";
-    gname.textContent = entry.folder;
+    gname.className = "wm2-gname";
+    gname.textContent = g.folder;
     gname.title = "双击重命名";
-    gname.onclick = (e) => e.stopPropagation(); // 双击改名，单击不折叠
-    gname.ondblclick = () => {
+    gname.ondblclick = (e) => {
+        e.stopPropagation();
         const inp = document.createElement("input");
-        inp.className = "wm-gname-input";
-        inp.value = entry.folder;
+        inp.className = "wm2-rename";
+        inp.value = g.folder;
         gname.replaceWith(inp);
-        inp.focus();
-        inp.select();
-        const commit = () => {
+        head.draggable = false;      // 编辑期间关掉整行拖拽，否则选字会被当成拖拽
+        inp.focus(); inp.select();
+        const done = () => {
             const v = inp.value.trim();
-            if (v) entry.folder = v;
+            if (v) g.folder = v;
             syncData(node);
-            renderRows(node);
+            renderRows(node, true);
         };
-        inp.addEventListener("blur", commit);
-        inp.addEventListener("keydown", (ev) => { if (ev.key === "Enter") inp.blur(); });
+        inp.onblur = () => { head.draggable = true; done(); };
+        inp.onkeydown = (ev) => { ev.stopPropagation(); if (ev.key === "Enter") inp.blur(); };
+        inp.onclick = (ev) => ev.stopPropagation();
+        inp.ondblclick = (ev) => ev.stopPropagation();
     };
     head.append(gname);
 
+    const nOn = (g.loras || []).filter((l) => l.on).length;
     const cnt = document.createElement("span");
-    cnt.className = "wm-gcnt";
-    cnt.textContent = (entry.loras || []).length;
+    cnt.className = "wm2-gcnt";
+    cnt.textContent = `${nOn}/${(g.loras || []).length}`;
     head.append(cnt);
 
-    const chev = document.createElement("span");
-    chev.className = "wm-chev";
-    chev.textContent = "▾";
-    head.append(chev);
-
-    const gdel = document.createElement("span");
-    gdel.className = "wm-gdel";
-    gdel.textContent = "✕";
-    gdel.title = "删除配方（组内 LoRA 一并移除）";
-    gdel.onclick = (e) => {
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "wm2-ico del";
+    del.textContent = "✕";
+    del.title = "删除配方";
+    del.onclick = (e) => {
         e.stopPropagation();
-        node.__loraStack.splice(gi, 1);
+        node.__wm2Stack.splice(gi, 1);
         syncData(node);
-        renderRows(node);
+        renderRows(node, true);
     };
-    head.append(gdel);
+    head.append(del);
 
-    // 点组头空白 = 折叠/展开
-    head.addEventListener("click", () => {
-        entry.open = entry.open === false;
-        grp.classList.toggle("closed", entry.open === false);
+    head.onclick = (e) => {
+        // 点名字（要双击改名）和点重命名框都不该折叠，否则第一次 click 就把 DOM 换了，dblclick 永远打不中
+        if (e.target.closest(".wm2-gname,.wm2-rename")) return;
+        g.open = g.open === false;
         syncData(node);
+        renderRows(node, true);
+    };
+
+    // 整行组头可拖：拖到别的组上/下边缘调顺序，或拖到顶层行前后插入
+    head.draggable = true;
+    head.addEventListener("dragstart", (e) => {
+        e.stopPropagation();
+        node.__wm2Drag = { kind: "group", gi };
+        grp.classList.add("drag");
+        try { e.dataTransfer.setData("text/plain", `wm2:${node.id}:group`); } catch (err) {}
+        e.dataTransfer.effectAllowed = "move";
+    });
+    head.addEventListener("dragend", () => { node.__wm2Drag = null; clearMarks(node); renderRows(node, true); });
+    head.addEventListener("dragover", (e) => {
+        const dg = node.__wm2Drag;
+        if (!dg || (dg.kind === "group" && dg.gi === gi)) return;
+        e.preventDefault(); e.stopPropagation();
+        e.dataTransfer.dropEffect = "move";
+        clearMarks(node);
+        grp.classList.add("over");
+    });
+    head.addEventListener("drop", (e) => {
+        const dg = node.__wm2Drag;
+        if (!dg) return;
+        e.preventDefault(); e.stopPropagation();
+        if (dg.kind === "row") appendRowToGroup(node, dg.name, gi);
+        else if (dg.kind === "group" && dg.gi !== gi) moveGroup(node, dg.gi, gi + 1);
+        clearMarks(node);
+        syncData(node);
+        renderRows(node, true);
     });
 
-    const gbody = document.createElement("div");
-    gbody.className = "wm-gbody";
-    const gbodyin = document.createElement("div");
-    gbodyin.className = "wm-gbodyin";
-    const grows = document.createElement("div");
-    grows.className = "wm-grows";
-    gbodyin.append(grows);
-    gbody.append(gbodyin);
-    grp.append(head, gbody);
+    const body = document.createElement("div");
+    body.className = "wm2-gbody";
+    grp.append(body);
+    (g.loras || []).forEach((l) => body.append(makeRow(node, l, gi)));
 
-    if (!(entry.loras || []).length) {
-        const empty = document.createElement("div");
-        empty.className = "wm-gempty";
-        empty.textContent = "空配方 · 点下方按钮添加 LoRA";
-        grows.append(empty);
+    if (empty) {
+        const hint = document.createElement("div");
+        hint.className = "wm2-ghint";
+        hint.textContent = "空配方 · 双击组名可重命名";
+        body.append(hint);
     }
-    (entry.loras || []).forEach((r, ri) => {
-        grows.append(renderRowCard(node, r, `g${gi}r${ri}`));
+
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "wm2-gadd";
+    add.textContent = "＋ Add LoRA";
+    add.title = "往这个配方里加 LoRA";
+    add.onclick = (e) => { e.stopPropagation(); openModal(node, gi); };
+    body.append(add);
+
+    body.addEventListener("dragover", (e) => {
+        const dg = node.__wm2Drag;
+        if (!dg || dg.kind !== "row") return;
+        e.preventDefault(); e.stopPropagation();
+        clearMarks(node);
+        grp.classList.add("over");
+    });
+    body.addEventListener("drop", (e) => {
+        const dg = node.__wm2Drag;
+        if (!dg || dg.kind !== "row") return;
+        e.preventDefault(); e.stopPropagation();
+        appendRowToGroup(node, dg.name, gi);
+        clearMarks(node);
+        syncData(node);
+        renderRows(node, true);
     });
 
-    const gadd = document.createElement("button");
-    gadd.type = "button";
-    gadd.className = "wm-gadd";
-    gadd.textContent = "+ 添加到配方";
-    gadd.onclick = () => {
-        showChooser(node, (path) => {
-            entry.loras.push({ on: true, name: path, model: DEF_STRENGTH, tag: "", __tagOpen: false });
-            syncData(node);
-            renderRows(node);
-        });
-    };
-    grows.append(gadd);
-
-    bindGroupDrop(grp, node, gi);
     return grp;
 }
 
-function renderRows(node) {
-    if (!node.__wmBuilt || !node.__rowsEl) return;
-    injectStyle();
-    const stack = node.__loraStack || [];
-    node.__rowsEl.innerHTML = "";
+function renderRows(node, keepScroll) {
+    const list = node.__wm2List;
+    if (!list) return;
+    const top = list.scrollTop;
+    list.innerHTML = "";
 
-    if (!stack.length) {
-        const empty = document.createElement("div");
-        empty.className = "wm-lora-empty";
-        empty.innerHTML = `${EMPTY_SVG}<b>暂无 LoRA</b><span>点击下方「+ Add LoRA」添加，或右上角图标新建配方</span>`;
-        node.__rowsEl.append(empty);
+    const head = document.createElement("div");
+    head.className = "wm2-lhead";
+    const all = allRows(node), act = activeRows(node);
+    const allOn = all.length > 0 && act.length === all.length;
+    const tallob = document.createElement("span");
+    tallob.className = "tallob";
+    tallob.append(makeToggle(allOn, () => {
+        const turnOn = !allOn;
+        all.forEach((r) => { r.entry.on = turnOn; });
+        (node.__wm2Stack || []).forEach((e) => { if (e.folder) e.on = turnOn; });
+        syncData(node);
+        renderRows(node, true);
+    }, allOn ? "全部停用" : "全部启用"));
+    const t = document.createElement("span");
+    t.textContent = "Toggle All";
+    tallob.append(t);
+    tallob.onclick = (e) => e.stopPropagation();
+    head.append(tallob);
+
+    const cnt = document.createElement("span");
+    cnt.className = "act";
+    cnt.textContent = `${act.length}/${all.length}`;
+    head.append(cnt);
+
+    const missCount = all.filter((r) => r.entry.name && node.__wm2Known && !node.__wm2Known.has(norm(r.entry.name))).length;
+    if (missCount > 0) {
+        const m = document.createElement("span");
+        m.className = "miss";
+        m.textContent = `⚠ ${missCount} 缺失`;
+        head.append(m);
     }
 
-    stack.forEach((entry, gi) => {
-        if (entry.folder) node.__rowsEl.append(renderGroup(node, entry, gi));
-        else node.__rowsEl.append(renderRowCard(node, entry, "t" + gi));
+    const sl = document.createElement("span");
+    sl.className = "slabel";
+    sl.innerHTML = `Strength<span class="hint">↔ 拖动等比调全部</span>`;
+    head.append(sl);
+
+    // 表头横向拖动 = 等比缩放全部启用行
+    head.addEventListener("pointerdown", (ev) => {
+        if (ev.button !== 0 || ev.target.closest(".wm2-tgl")) return;
+        ev.stopPropagation();
+        const rows = activeRows(node).map((r) => ({ entry: r.entry, orig: r.entry.model }));
+        if (!rows.length) return;
+        const sx = ev.clientX;
+        let moved = false;
+        const hint = head.querySelector(".hint");
+        const mv = (m) => {
+            if (!moved && Math.abs(m.clientX - sx) < 4) return;
+            moved = true;
+            const k = 1 + (m.clientX - sx) * 0.0005;
+            rows.forEach((r) => { r.entry.model = clampStep(Math.max(-10, Math.min(10, r.orig * k))); });
+            if (hint) { hint.textContent = `×${k.toFixed(2)}`; hint.style.opacity = 1; hint.style.color = "var(--wm-lo-accent)"; }
+            paintAllStrength(node);
+        };
+        const up = () => {
+            document.removeEventListener("pointermove", mv);
+            document.removeEventListener("pointerup", up);
+            syncData(node);
+            renderRows(node, true);
+        };
+        document.addEventListener("pointermove", mv);
+        document.addEventListener("pointerup", up);
+    });
+    list.append(head);
+
+    if (!all.length) {
+        const e = document.createElement("div");
+        e.className = "wm2-empty";
+        e.innerHTML = `还没有 LoRA<br>上方<b>搜索框</b>输入关键词回车，或点下方<b>Add LoRA</b> 浏览全部`;
+        list.append(e);
+    }
+    (node.__wm2Stack || []).forEach((entry, i) => {
+        list.append(entry.folder ? makeGroup(node, entry, i) : makeRow(node, entry, -1));
     });
 
-    if (node.__rowsDomWidget && node.__rowsDomWidget.computeSize) {
-        scheduleResize(node);
+    if (keepScroll) list.scrollTop = top;
+}
+
+// 只刷新数值与填充条，不重建 DOM（拖动中调用，避免抖焦点）
+function paintAllStrength(node) {
+    const rows = [...(node.__wm2List?.querySelectorAll(".wm2-wrap") || [])];
+    const map = new Map();
+    allRows(node).forEach((r) => map.set(norm(r.entry.name), r.entry));
+    rows.forEach((w) => {
+        const e = map.get(norm(w.dataset.name));
+        if (!e) return;
+        const inp = w.querySelector(".wm2-sv");
+        if (!inp) return;
+        inp.value = e.model.toFixed(2);
+        inp.style.setProperty("--v", Math.max(0, Math.min(100, (Math.abs(e.model) / 2) * 100)) + "%");
+    });
+}
+
+//==============================================================================
+// 添加 LoRA
+//==============================================================================
+// 自动填 tag（读 civitai trainedWords）；已有 tag 的行不覆盖
+function autoFillTag(node, entry) {
+    const path = entry.name;
+    if (!path) return;
+    fetchTag(path).then((tag) => {
+        if (!tag || entry.tag) return;
+        entry.tag = tag;
+        _tagCache.set(norm(path), tag);
+        syncData(node);
+        if (!node.__wm2TagOpen.has(norm(path))) {
+            const wrap = node.__wm2List?.querySelector(`.wm2-wrap[data-name="${CSS.escape(path)}"]`);
+            const btn = wrap?.querySelector(".wm2-ico.tag-none");
+            if (btn) { btn.className = "wm2-ico tag-has"; btn.title = "编辑 tag：" + tag; }
+        } else {
+            renderRows(node, true);
+        }
+    });
+}
+
+function addEntry(node, path, gi) {
+    if (rowFull(node)) { warn(node, `已达上限 ${MAX_ROWS} 条`); return null; }
+    const entry = { on: true, name: path, model: DEF_STRENGTH, tag: "" };
+    if (gi >= 0 && node.__wm2Stack[gi]?.folder) node.__wm2Stack[gi].loras.push(entry);
+    else node.__wm2Stack.push(entry);
+    node.__wm2Sel = norm(path);
+    syncData(node);
+    renderRows(node, true);
+    autoFillTag(node, entry);
+    return entry;
+}
+
+// 就地换掉某一行的 LoRA：只改路径，强度 / tag / 启用状态都跟着行保留
+function replaceEntry(node, entry, path) {
+    if (!path) return false;
+    if (norm(path) === norm(entry.name)) return true;
+    // 拦重复只看「同一层」：配方里允许和外面、组内重复；顶层不允许出现两条同名。
+    const inGroup = (node.__wm2Stack || []).some((e) => e.folder && (e.loras || []).includes(entry));
+    const dup = inGroup ? false
+        : usedTopPaths(node).has(norm(path));
+    if (dup) { warn(node, `列表里已经有「${stemOf(baseOf(path))}」了`); return false; }
+    const hadTag = !!entry.tag;
+    node.__wm2TagOpen?.delete(norm(entry.name));    // tagOpen / 选中态都按路径记，旧键清掉
+    entry.name = path;
+    node.__wm2Sel = norm(path);
+    syncData(node);
+    renderRows(node, true);
+    if (!hadTag) autoFillTag(node, entry);
+    else _tagCache.set(norm(path), entry.tag);
+    warn(node, `已换成 ${stemOf(baseOf(path))}`);
+    return true;
+}
+
+let _warnTimers = new WeakMap();
+export function warn(node, msg, isErr) {
+    const el = node.__wm2Warn;
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.toggle("err", !!isErr);
+    el.classList.add("on");
+    clearTimeout(_warnTimers.get(node));
+    _warnTimers.set(node, setTimeout(() => el.classList.remove("on"), 2600));
+}
+
+//==============================================================================
+// 浏览弹窗（多选添加 / 单选替换 + 文件夹侧栏）
+//==============================================================================
+let _bd = null, _bdState = null;
+function closeModal() {
+    if (_bd) _bd.classList.remove("open");
+    _bdState = null;
+    hidePv();
+}
+// opts.replace = 某个行条目 → 进入「重新选择」单选模式（点 LoRA 名字进来走这里）
+function openModal(node, gi, opts = {}) {
+    injectStyle();
+    const repl = opts.replace || null;
+    const bd = _bd && _bd.isConnected ? _bd : (() => {
+        const b = document.createElement("div");
+        b.className = "wm2-bd";
+        document.body.append(b);
+        _bd = b;
+        return b;
+    })();
+    _bdState = { node, gi, kw: "", dir: null, sel: new Set(), replace: repl };
+    bd.innerHTML = "";
+    bd.classList.add("open");
+
+    const m = document.createElement("div");
+    m.className = "wm2-modal";
+    bd.append(m);
+
+    const h = document.createElement("h4");
+    h.textContent = repl
+        ? `重新选择 LoRA · ${stemOf(baseOf(repl.name || ""))}`
+        : (gi >= 0 && node.__wm2Stack[gi] ? `添加到配方 · ${node.__wm2Stack[gi].folder}` : "Add LoRA");
+    const x = document.createElement("span");
+    x.className = "x";
+    x.textContent = "✕";
+    x.onclick = () => closeModal();
+    h.append(x);
+    m.append(h);
+
+    const searchWrap = document.createElement("div");
+    searchWrap.className = "wm2-msearch";
+    searchWrap.innerHTML = IC.mag;
+    const kw = document.createElement("input");
+    kw.type = "text";
+    kw.placeholder = "搜索 LoRA 名称 / 文件夹…";
+    kw.onkeydown = (e) => e.stopPropagation();
+    kw.oninput = () => { _bdState.kw = kw.value; renderList(); };
+    searchWrap.append(kw);
+    m.append(searchWrap);
+    setTimeout(() => kw.focus(), 0);
+
+    const body = document.createElement("div");
+    body.className = "wm2-mbody";
+    m.append(body);
+    const side = document.createElement("div");
+    side.className = "wm2-mside";
+    const list = document.createElement("div");
+    list.className = "wm2-mlist";
+    body.append(side, list);
+
+    const foot = document.createElement("div");
+    foot.className = "wm2-mfoot";
+    const cnt = document.createElement("span");
+    cnt.className = "cnt";
+    const sp = document.createElement("span");
+    sp.className = "sp";
+    const cancel = document.createElement("button");
+    cancel.textContent = "取消";
+    cancel.onclick = () => closeModal();
+    const ok = document.createElement("button");
+    ok.className = "ok";
+    ok.textContent = repl ? "替换" : "添加";
+    ok.onclick = () => {
+        const picks = [...(_bdState?.sel || [])];
+        if (repl) {
+            closeModal();
+            replaceEntry(node, repl, picks[0]);
+            return;
+        }
+        let added = 0;
+        picks.forEach((p) => { if (addEntry(node, p, gi)) added += 1; });
+        closeModal();
+        if (added) warn(node, `已添加 ${added} 个 LoRA`);
+    };
+    foot.append(cnt, sp, cancel, ok);
+    m.append(foot);
+
+    function dirsOf(listPaths) {
+        const m2 = new Map();
+        listPaths.forEach((p) => { const d = dirOf(p) || "根目录"; m2.set(d, (m2.get(d) || 0) + 1); });
+        return [...m2.entries()].sort((a, b) => a[0].localeCompare(b[0]));
     }
-}
+    function items() {
+        // 只按「顶层行」判重：配方里挂过的 LoRA 依然要出现在顶层 Add LoRA 列表里
+        const used = usedTopPaths(node);
+        const hideUsed = !repl && gi < 0;
+        const kw2 = _bdState.kw.trim().toLowerCase();
+        return (node.__wm2All || []).filter((p) => {
+            if (_bdState.dir !== null && (dirOf(p) || "根目录") !== _bdState.dir) return false;
+            if (kw2 && !norm(p).toLowerCase().includes(kw2) && !stemOf(baseOf(p)).toLowerCase().includes(kw2)) return false;
+            return true;
+        }).filter((p) => !hideUsed || !used.has(norm(p)));
+    }
+    function renderSide() {
+        side.innerHTML = "";
+        const all = (node.__wm2All || []).length;
+        const mk = (label, dir, n) => {
+            const it = document.createElement("div");
+            it.className = "f" + (_bdState.dir === dir ? " on" : "");
+            it.innerHTML = IC.folder;
+            const s = document.createElement("span");
+            s.textContent = label;
+            const c = document.createElement("span");
+            c.className = "n";
+            c.textContent = n;
+            it.append(s, c);
+            it.onclick = () => { _bdState.dir = dir; renderSide(); renderList(); };
+            side.append(it);
+        };
+        mk("全部", null, all);
+        dirsOf((node.__wm2All || []).filter((p) => {
+            const kw2 = _bdState.kw.trim().toLowerCase();
+            return !kw2 || norm(p).toLowerCase().includes(kw2);
+        })).forEach(([d, n]) => mk(d, d, n));
+    }
+    // 选中态只改 class，不重建列表（多选时每点一次都重排一次会闪）
+    function refreshSelUI() {
+        list.querySelectorAll(".wm2-mit").forEach((it) => {
+            const on = _bdState.sel.has(it.dataset.p);
+            it.classList.toggle("on", on);
+            const tg = it.querySelector(".wm2-tgl");
+            if (tg) tg.className = on ? "wm2-tgl on" : "wm2-tgl";
+        });
+        cnt.textContent = repl
+            ? (_bdState.sel.size ? `换成：${stemOf(baseOf([..._bdState.sel][0]))}` : "单选一个 LoRA")
+            : `已选 ${_bdState.sel.size} 个 · 可多选`;
+        ok.disabled = _bdState.sel.size === 0;
+    }
+    function renderList() {
+        list.innerHTML = "";
+        const its = items();
+        const used = usedTopPaths(node);     // 提示胶囊里的「外面已有」只看顶层行
+        if (!its.length) {
+            const e = document.createElement("div");
+            e.className = "wm2-empty";
+            e.textContent = repl ? "没有可选的 LoRA"
+                : gi >= 0 ? "没有匹配的 LoRA" : "没有匹配的 LoRA（顶层已添加过的不再出现）";
+            list.append(e);
+        }
+        its.slice(0, 200).forEach((p) => {
+            const it = document.createElement("div");
+            const on = _bdState.sel.has(p);
+            it.className = "wm2-mit" + (on ? " on" : "");
+            it.dataset.p = p;
+            const th = document.createElement("span");
+            th.className = "th";
+            th.textContent = stemOf(baseOf(p)).slice(0, 2).toUpperCase();
+            const im = document.createElement("img");
+            im.loading = "lazy";
+            im.onerror = () => im.remove();
+            im.src = previewUrl(p);
+            th.append(im);
+            const nm = document.createElement("span");
+            nm.className = "nm";
+            const t = document.createElement("span");
+            t.className = "t";
+            t.textContent = stemOf(baseOf(p));
+            t.title = p;
+            nm.append(t);
+            const tg = document.createElement("span");
+            tg.className = on ? "wm2-tgl on" : "wm2-tgl";
+            it.append(th, nm);
+            // 小角标：替换模式标「当前」；往配方里加时标出「外面已有 / 组内已有」，但仍然可选
+            let chip = "";
+            if (repl && norm(p) === norm(repl.name)) chip = "当前";
+            else if (!repl && gi >= 0) {
+                const inGrp = (node.__wm2Stack[gi]?.loras || []).some((l) => norm(l.name) === norm(p));
+                if (inGrp) chip = "组内已有";
+                else if (used.has(norm(p))) chip = "外面已有";
+            } else if (!repl && gi < 0 && inAnyGroup(node, p)) chip = "配方里已有";   // 只是提示，内外可以同时挂
+            else if (repl && used.has(norm(p))) chip = "外面已有";   // 替换到顶层重名会被拦，先给个提示
+            if (chip) {
+                const lab = document.createElement("span");
+                lab.className = "tagu";
+                lab.textContent = chip;
+                it.append(lab);
+            }
+            it.append(tg);
+            it.onclick = () => {
+                if (repl) { _bdState.sel.clear(); _bdState.sel.add(p); }   // 单选
+                else if (_bdState.sel.has(p)) _bdState.sel.delete(p);
+                else _bdState.sel.add(p);
+                refreshSelUI();
+            };
+// 悬停弹预览：走全局浮层单例，锚点用名称元素
+            it.addEventListener("mouseenter", () => {
+                clearTimeout(_pvTimer);
+                _pvTimer = setTimeout(() => showPv(p, nm), 300);
+            });
+            it.addEventListener("mouseleave", hidePv);
+            list.append(it);
+        });
+        refreshSelUI();
+    }
+    renderSide();
+    renderList();
 
-function updateFolderBtn(btn, node) {
-    if (!btn) return;
-    const f = node.__folderFilter;
-    const n = Array.isArray(f) ? f.length : 0;
-    btn.innerHTML =
-        `<span class="wm-fb-ic">📁</span><span class="wm-fb-txt">文件夹筛选</span>` +
-        (n ? `<span class="wm-fb-badge">${n}</span>` : `<span class="wm-fb-badge off">全部</span>`) +
-        `<span class="wm-fb-chev">▾</span>`;
-}
-
-function uniqueGroupName(stack) {
-    const names = new Set(stack.filter((e) => e.folder).map((e) => e.folder));
-    if (!names.has("新配方")) return "新配方";
-    let i = 2;
-    while (names.has("新配方 " + i)) i += 1;
-    return "新配方 " + i;
+    bd.onclick = (e) => { if (e.target === bd) closeModal(); };
 }
 
 //==============================================================================
-// 核心 UI 构建
+// 节点尺寸：容器填满节点内部可用高度，高度差由 flex:1 的列表吸收
+//   底距（按钮条 → 框底）= 左右内边距；chrome = computeSize() 高 - UI_H
 //==============================================================================
-function buildCoreUI(node) {
-    if (node.__wmBuilt) return;
-    node.__wmBuilt = true;
+export function measureChrome(node) {
+    const sz = node.computeSize?.();
+    const h = Array.isArray(sz) && Number.isFinite(sz[1]) ? sz[1] : NaN;
+    if (!Number.isFinite(h) || h <= UI_H) return node.__wm2Chrome ?? DEFAULT_CHROME;
+    return Math.max(8, Math.round(h - UI_H));
+}
+// 节点框判据：缩放必须等于 ds.scale，否则会把 widget 包装层当成框（量出来一直偏大）
+function findFrameEl(node) {
+    const out = { el: null, rect: null, k: null, cands: [] };
+    try {
+        const c = node.__wm2Container;
+        if (!c || !Array.isArray(node.size) || !(node.size[0] > 20) || !(node.size[1] > 20)) return out;
+        const cr = c.getBoundingClientRect();
+        const want = app?.canvas?.ds?.scale;
+        const hasWant = Number.isFinite(want) && want > 0;
+        let el = c.parentElement;
+        for (let i = 0; el && i < 8; i++) {
+            const r = el.getBoundingClientRect();
+            const kx = r.width / node.size[0];
+            const ky = r.height / node.size[1];
+            const fits = cr.left >= r.left - 3 && cr.right <= r.right + 3 && cr.top >= r.top - 3;
+            if (kx > 0.1 && ky > 0.1 && fits && Math.abs(kx - ky) <= 0.06 * Math.max(kx, ky)) {
+                out.cands.push(`${(el.className || el.tagName || "?").toString().slice(0, 34)} k=${kx.toFixed(3)}`);
+                if (!hasWant || Math.abs(kx - want) <= 0.03 * want) {
+                    out.el = el; out.rect = r; out.k = kx;
+                    return out;
+                }
+            }
+            el = el.parentElement;
+        }
+    } catch (e) { /* 量不到就算了 */ }
+    return out;
+}
+// 节点框屏幕几何：DOM 优先，退回画布坐标换算（screen = canvasRect + ds.offset + pos*scale）
+function nodeFrameRect(node) {
+    const f = findFrameEl(node);
+    if (f.rect) return { rect: f.rect, k: f.k, source: "dom", cands: f.cands };
+    const nr = nodeRectOnScreen(node);
+    if (nr) return { rect: nr, k: nr.scale, source: "canvas", cands: f.cands };
+    return { rect: null, k: null, source: "none", cands: f.cands };
+}
 
-    const dataW = getDataWidget(node);
-    hideWidget(node, dataW);
+// 画布缩放：优先用 DOM 框反推，退回 ds.scale
+export function canvasScale(node) {
+    const s = app?.canvas?.ds?.scale;
+    if (Number.isFinite(s) && s > 0) return s;
+    const fr = nodeFrameRect(node);
+    return Number.isFinite(fr.k) && fr.k > 0 ? fr.k : null;
+}
+
+// 左右内边距：优先按节点框实测；__wm2WidgetW 是上一次 computeSize 的宽度，只做兜底
+function sideInset(node) {
+    const c = node.__wm2Container;
+    if (c) {
+        const fr = nodeFrameRect(node);
+        if (fr.rect) {
+            const cr = c.getBoundingClientRect();
+            const d = ((cr.left - fr.rect.left) + (fr.rect.right - cr.right)) / 2 / fr.k;
+            if (Number.isFinite(d) && d >= 0 && d < 80) return d;
+        }
+    }
+    const nw = node.size?.[0];
+    if (!Number.isFinite(nw)) return null;
+    let avail = NaN;
+    if (c) {
+        const k = canvasScale(node);
+        const w = c.getBoundingClientRect().width;
+        if (k && Number.isFinite(w) && w > 0) avail = w / k;
+    }
+    if (!Number.isFinite(avail) || avail <= 0) avail = node.__wm2WidgetW;
+    if (!Number.isFinite(avail) || avail <= 0) return null;
+    const d = nw - avail;
+    return d >= 0 && d < 160 ? d / 2 : null;
+}
+// widget 起点：各版本 last_y 有「从节点顶」和「从中心」两种口径，用 (0, chrome] 区间判断
+function widgetTop(node) {
+    const chrome = node.__wm2Chrome ?? DEFAULT_CHROME;
+    const y = node.__wm2DomWidget?.last_y;
+    if (!Number.isFinite(y)) return null;
+    const half = (node.size?.[1] || 0) / 2;
+    const ok = (v) => Number.isFinite(v) && v > 0 && v <= chrome;
+    if (ok(y + half)) return y + half;
+    if (ok(y)) return y;
+    return null;
+}
+// 容器填满可用高度，并把底距调成和左右内边距一致（onResize 里也调，跟手）
+// 实测成功过的 topOff/inset 会缓存起来，免得下次重渲染又被推断值顶回出框
+export function lockBottomBar(node) {
+    const c = node.__wm2Container;
+    if (!c) return;
+    const chrome = node.__wm2Chrome ?? DEFAULT_CHROME;
+    const measured = Number.isFinite(node.__wm2MeasTop) && Number.isFinite(node.__wm2MeasInset);
+    const top = measured ? node.__wm2MeasTop : widgetTop(node);
+    const inset = measured ? node.__wm2MeasInset : sideInset(node);
+// 量得到就按「底距 = 左右间距」，量不到退回 chrome 并留 GAP_SAFETY 余量
+    const safety = measured ? 0 : GAP_SAFETY;
+    const wantH = Math.round((top != null && inset != null
+        ? node.size[1] - top - inset
+        : (node.size?.[1] || 0) - chrome) - safety);
+    const h = Math.max(MIN_CONTAINER_H, wantH);
+    // 矮到装不下「搜索框 + 列表最小高度 + 按钮条」时把节点顶回来：再缩按钮条就要出框了
+    const avail = Math.round((node.size?.[1] || 0) - (top ?? chrome) - (inset ?? 0));
+    if (avail < MIN_CONTAINER_H && h === MIN_CONTAINER_H && !node.__wm2Snapping && typeof node.setSize === "function") {
+        node.__wm2Snapping = true;
+        try { node.setSize([node.size?.[0] || MIN_NODE_W, MIN_CONTAINER_H + (top ?? chrome) + (inset ?? 0)]); } finally { node.__wm2Snapping = false; }
+    }
+    if (Math.round(c.getBoundingClientRect().height) !== h) c.style.height = h + "px";
+    node.setDirtyCanvas?.(true, false);
+// 推断完再用真实屏幕几何校正一轮（前端版本一变推断就会偏）
+    node.__wm2GapTries = 0;      // 每次重新布局都允许再收敛几轮
+    scheduleGapFix(node);
+}
+
+// 节点矩形换算到屏幕坐标：LiteGraph 的画布变换是 screen = canvasRect + ds.offset + pos * ds.scale
+function nodeRectOnScreen(node) {
+    try {
+        const cv = app?.canvas?.canvas;
+        const ds = app?.canvas?.ds;
+        if (!cv || !ds || !Number.isFinite(ds.scale) || ds.scale <= 0) return null;
+        if (!Array.isArray(node.pos) || !Array.isArray(node.size)) return null;
+        const r = cv.getBoundingClientRect();
+        const left = r.left + ds.offset[0] + node.pos[0] * ds.scale;
+        const top = r.top + ds.offset[1] + node.pos[1] * ds.scale;
+        const w = node.size[0] * ds.scale;
+        const h = node.size[1] * ds.scale;
+        if ([left, top, w, h].some((v) => !Number.isFinite(v))) return null;
+        return { left, top, right: left + w, bottom: top + h, scale: ds.scale };
+    } catch (e) { return null; }
+}
+
+// 实测「按钮条 → 框底」；出框（actual 为负）正是要修的情况，不能当异常跳过
+function measureBottomGap(node) {
+    const c = node.__wm2Container;
+    if (!c) { gapDiag(node, "no-container"); return null; }
+    const cr = c.getBoundingClientRect();
+    if (cr.width < 8 || cr.height < 8) { gapDiag(node, "not-laid-out"); return null; }   // 还没布局 / 节点在屏幕外
+    const fr = nodeFrameRect(node);
+    if (!fr.rect) { gapDiag(node, "no-frame"); return null; }
+    const { rect, k } = fr;
+    // 容器横向必须真的落在框内，否则参考系不可信（纵向允许超出 = 出框，正是要修的）
+    if (cr.left < rect.left - 4 || cr.right > rect.right + 4 || cr.top < rect.top - 4) {
+        gapDiag(node, "container-outside-frame"); return null;
+    }
+// 参考系宽度须与容器同量级，差太多说明认错了元素，宁可不校正
+    if (Math.abs(rect.width - cr.width) > 0.2 * rect.width) { gapDiag(node, "frame width mismatch"); return null; }
+    let inset = sideInset(node);
+    if (!Number.isFinite(inset) || inset < 0 || inset > 80) inset = DEFAULT_INSET;
+    return { actual: (rect.bottom - cr.bottom) / k, inset, k,
+             topOff: (cr.top - rect.top) / k, source: fr.source };
+}
+
+// 量不到时往控制台打一次现场几何（最多 6 条）
+let _gapDiagN = 0;
+function gapDiag(node, why, ok) {
+    if (!ok && _gapDiagN >= 6) return;
+    if (!ok) _gapDiagN += 1;
+    try {
+        const c = node.__wm2Container;
+        const cr = c?.getBoundingClientRect?.();
+        const cv = app?.canvas;
+        const car = cv?.canvas?.getBoundingClientRect?.();
+        const info = {
+            来源: ok ? "实测成功" : "跳过",
+            原因: why || "",
+            size: node.size ? [Math.round(node.size[0]), Math.round(node.size[1])] : null,
+            pos: node.pos ? [Math.round(node.pos[0]), Math.round(node.pos[1])] : null,
+            chrome: node.__wm2Chrome,
+            容器高: c ? Math.round(cr.height) : null,
+            容器底: c ? Math.round(cr.bottom) : null,
+            ds: cv?.ds ? { scale: cv.ds.scale, offset: [Math.round(cv.ds.offset?.[0] ?? NaN), Math.round(cv.ds.offset?.[1] ?? NaN)] } : null,
+            canvasRect: car ? [Math.round(car.left), Math.round(car.top), Math.round(car.width), Math.round(car.height)] : null,
+            祖先: (() => { const out = []; let el = c?.parentElement;
+                for (let i = 0; el && i < 7; i++) {
+                    const r = el.getBoundingClientRect();
+                    out.push(`${(el.className || el.tagName || "?").toString().slice(0, 36)} ${Math.round(r.width)}×${Math.round(r.height)}`);
+                    el = el.parentElement; } return out; })(),
+        };
+        if (ok) info.实测 = `底距 ${ok.actual.toFixed(1)} → 目标 ${ok.inset.toFixed(1)}（k=${ok.k.toFixed(2)}）`;
+        console.warn("[WindMix LoRA] 底距实测", info);
+    } catch (e) { /* 诊断本身不能出问题 */ }
+}
+
+function applyGapFix(node) {
+    const c = node.__wm2Container;
+    if (!c) return;
+    const m = measureBottomGap(node);
+    if (!m) return;
+// 缓存实测值，lockBottomBar 下次直接用
+    if (Number.isFinite(m.topOff) && m.topOff > 0 && m.topOff < 200) node.__wm2MeasTop = m.topOff;
+    if (Number.isFinite(m.inset) && m.inset >= 0 && m.inset < 80) node.__wm2MeasInset = m.inset;
+// Δ高度 = 实测底距 - 目标底距（加高容器会减小底距）
+    const delta = Math.round(m.actual - m.inset);
+    if (Math.abs(delta) > 600) { gapDiag(node, `delta 过大 ${delta}`); return; }
+    const cur = parseFloat(c.style.height);
+    const base = Number.isFinite(cur) ? cur : c.getBoundingClientRect().height / (m.k || 1);
+    if (!delta) { againGap(node, 2); return; }   // LiteGraph 可能随后又重排，复查两轮
+    const next = Math.max(MIN_CONTAINER_H, Math.round(base) + delta);
+    if (next === Math.round(base)) { againGap(node, 2); return; }
+    c.style.height = next + "px";
+    gapDiag(node, "", m);
+    // 需要更高、但节点内部装不下时把节点本身撑大，保证按钮条永远在框里且底距不变
+    const topOff = Number.isFinite(m.topOff) ? m.topOff : (node.__wm2MeasTop ?? (node.__wm2Chrome ?? DEFAULT_CHROME));
+    const need = Math.round(topOff + next + m.inset);
+    if (need > node.size[1] && need - node.size[1] < 400 && typeof node.setSize === "function") {
+        node.setSize([node.size[0], need]);
+    }
+    node.setDirtyCanvas?.(true, false);
+    againGap(node, 3);        // 改完布局还会变，再收敛几轮（次数由 lockBottomBar 复位，不会自我循环）
+}
+// 改完布局前端还会重排，复查两轮；次数由 lockBottomBar 复位
+function againGap(node, cap) {
+    if ((node.__wm2GapTries || 0) >= cap) return;
+    node.__wm2GapTries = (node.__wm2GapTries || 0) + 1;
+    setTimeout(() => scheduleGapFix(node), 140);
+}
+
+function scheduleGapFix(node) {
+    if (node.__wm2GapQueued) return;
+    node.__wm2GapQueued = true;
+    const run = () => {
+        if (!node.__wm2GapQueued) return;             // rAF / 定时器谁先到谁做，只做一次
+        node.__wm2GapQueued = false;
+        try { applyGapFix(node); } catch (e) { /* 量不到就沿用推断值 */ }
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+    setTimeout(run, 60);   // 后台标签页里 rAF 不触发，兜一下
+}
+// 建好界面 / 从 workflow 恢复后：先把节点撑到至少装得下整个界面，再锁底
+export function ensureNodeFits(node) {
+    node.__wm2Chrome = measureChrome(node);
+    const w0 = Math.round(node.size?.[0] || 0);
+    const h0 = Math.round(node.size?.[1] || 0);
+    const w = Math.max(w0 || MIN_NODE_W, MIN_NODE_W);
+    const h = Math.max(h0, UI_H + node.__wm2Chrome);
+    if (w !== w0 || h !== h0) {
+        if (typeof node.setSize === "function") node.setSize([w, h]);
+        else node.size = [w, h];
+        node.__wm2Chrome = measureChrome(node);
+    }
+    lockBottomBar(node);
+    node.setDirtyCanvas?.(true, true);
+}
+
+//==============================================================================
+// 主体 UI
+//==============================================================================
+function buildUI(node) {
+    if (node.__wm2Built) return;
+    node.__wm2Built = true;
+    injectStyle();
+
+    hideWidget(node, getDataWidget(node));
+    node.__wm2TagOpen = node.__wm2TagOpen || new Set();
+    node.__wm2Sel = null;
     loadStack(node);
 
-    // 整块用 DOM 控件（不混用 litegraph addWidget），Nodes 1.0/2.0 双端定位一致。
-    const container = document.createElement("div");
-    container.className = "wm-lora-container";
+    const c = document.createElement("div");
+    c.className = "wm2-container";
+    node.__wm2Container = c;
+    c.addEventListener("pointerdown", (e) => e.stopPropagation());
+    c.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
+    c.addEventListener("keydown", (e) => e.stopPropagation());
+    c.addEventListener("focusin", (e) => { if (e.target.tagName === "INPUT") e.stopPropagation(); });
 
-    // 1) 顶部按钮行：新建配方（图标） + 文件夹筛选
-    const toprow = document.createElement("div");
-    toprow.className = "wm-lora-toprow";
+    // 1) 搜索即添加
+    const search = document.createElement("div");
+    search.className = "wm2-search";
+    const mag = document.createElement("span");
+    mag.className = "mag";
+    mag.innerHTML = IC.mag;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "搜索 LoRA 名称 / 文件夹… 回车添加";
+    input.spellcheck = false;
+    const clr = document.createElement("button");
+    clr.type = "button";
+    clr.className = "clr";
+    clr.textContent = "✕";
+    clr.title = "清空";
+    const kbd = document.createElement("span");
+    kbd.className = "kbd";
+    kbd.textContent = "Enter";
+    search.append(mag, input, clr, kbd);
+    c.append(search);
+    node.__wm2Search = search;
+    node.__wm2SearchInput = input;
 
-    const newGrpBtn = document.createElement("button");
-    newGrpBtn.type = "button";
-    newGrpBtn.className = "wm-lora-newgrp";
-    newGrpBtn.title = "新建配方";
-    newGrpBtn.innerHTML = FOLDER_PLUS_SVG;
-    newGrpBtn.onclick = () => {
-        node.__loraStack.push({
-            folder: uniqueGroupName(node.__loraStack),
-            on: true, open: true, loras: [], __tagOpen: false,
-        });
-        syncData(node);
-        renderRows(node);
-    };
-    toprow.append(newGrpBtn);
+    const openAc = () => { _acIdx = 0; renderAc(node, search); };
+    // 已经有缓存就同步弹，别让一个 await 把下拉推迟到「用户已经移开鼠标」之后
+    input.addEventListener("focus", () => {
+        search.classList.add("focus");
+        if (node.__wm2All?.length) openAc();
+        else refreshKnown(node).then(openAc);
+    });
+    // 输入框已聚焦时再点一次不再触发 focus —— 要靠 click 主动重开
+    input.addEventListener("click", () => {
+        if (_ac?.classList.contains("open") && _acNode === node) return;
+        openAc();
+    });
+    search.addEventListener("click", (e) => {
+        if (e.target === search || e.target.tagName !== "INPUT") openAc();
+    });
+    input.addEventListener("input", () => {
+        node.__wm2Kw = input.value;
+        search.classList.toggle("has-q", !!input.value);
+        _acIdx = 0;
+        renderAc(node, search);
+    });
+    // 失焦只去掉高亮，不收下拉：下拉由「点到外面 / Esc / 选中一条」来关
+    input.addEventListener("blur", () => { search.classList.remove("focus"); });
+    input.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "ArrowDown") { e.preventDefault(); acMove(1); }
+        else if (e.key === "ArrowUp") { e.preventDefault(); acMove(-1); }
+        else if (e.key === "Enter") {
+            e.preventDefault();
+            const p = _acItems[_acIdx];
+            if (p) pickAcItem(node, p);
+            else if (node.__wm2Kw.trim()) warn(node, `没找到「${node.__wm2Kw.trim()}」，换个关键词或用 Add LoRA 浏览`);
+        } else if (e.key === "Escape") { closeAc(); input.blur(); }
+    });
+    clr.onclick = (e) => { e.stopPropagation(); node.__wm2Kw = ""; input.value = ""; search.classList.remove("has-q"); input.focus(); };
+    clr.onmousedown = (e) => e.preventDefault();
 
-    const folderBtn = document.createElement("button");
-    folderBtn.className = "wm-folder-btn";
-    folderBtn.type = "button";
-    folderBtn.onclick = () => {
-        openFolderModal(node, node.__folderFilter || [], (sel) => {
-            node.__folderFilter = sel; // null = 全部
-            syncData(node);
-            updateFolderBtn(folderBtn, node);
-        });
-    };
-    toprow.append(folderBtn);
-    node.__wmFolderBtn = folderBtn;
-    container.append(toprow);
-
-    // 2) 行容器（顶层 LoRA 行 + 配方组）
-    const rowsEl = document.createElement("div");
-    rowsEl.className = "wm-lora-rows";
-    container.append(rowsEl);
-    node.__rowsEl = rowsEl;
-    bindTopDrop(rowsEl, node);
-
-    // 3) 重名拦截警告条（Add 按钮上方）
-    const warn = document.createElement("div");
-    warn.className = "wm-lora-warn";
-    container.append(warn);
-    node.__wmWarnEl = warn;
-
-    // 4) Add LoRA（加到顶层；取消则撤销空行）
-    const addBtn = document.createElement("button");
-    addBtn.className = "wm-lora-add";
-    addBtn.type = "button";
-    addBtn.textContent = "+ Add LoRA";
-    addBtn.onclick = () => {
-        const entry = { on: true, name: "", model: DEF_STRENGTH, tag: "", __tagOpen: false };
-        node.__loraStack.push(entry);
-        syncData(node);
-        renderRows(node);
-        showChooser(node, (path) => {
-            if (topNameConflict(node, { name: path, __probe: true })) {
-                showWarn(node, `顶层已存在同名：${basename(path)}（配方内外不受此限制）`);
-                return false;
-            }
-            applyChosenPath(node, entry, path);
-        }, () => {
-            const idx = node.__loraStack.indexOf(entry);
-            if (idx >= 0) {
-                node.__loraStack.splice(idx, 1);
-                syncData(node);
-                renderRows(node);
-            }
-        });
-    };
-    container.append(addBtn);
-
-    const domWidget = node.addDOMWidget("wm_lora_rows", "div", container, { serialize: false });
-    domWidget.serializeValue = () => undefined;
-    domWidget.computeSize = function (width) {
-        const el = node.__rowsDomWidget?.element || container;
-        // 用 scrollHeight 取真实内容高度（含被裁剪部分），避免外框比内容矮
-        let h = el ? (el.scrollHeight || el.offsetHeight || 0) : 0;
-        if (!h) {
-            const n = (node.__loraStack || []).length;
-            h = n === 0 ? 60 : n * ROW_H + 110;
+    // 2) 列表（固定高度 + 内滚动）
+    const list = document.createElement("div");
+    list.className = "wm2-list";
+    list.tabIndex = 0;
+    c.append(list);
+    node.__wm2List = list;
+    // 顶层空白处 = 落到顶层末尾
+    list.addEventListener("dragover", (e) => {
+        if (!node.__wm2Drag) return;
+        if (e.target.closest(".wm2-row") || e.target.closest(".wm2-gh") || e.target.closest(".wm2-gbody")) return;
+        e.preventDefault(); e.stopPropagation();
+        e.dataTransfer.dropEffect = "move";
+    });
+    list.addEventListener("drop", (e) => {
+        const dg = node.__wm2Drag;
+        if (!dg) return;
+        if (e.target.closest(".wm2-row") || e.target.closest(".wm2-gh") || e.target.closest(".wm2-gbody")) return;
+        e.preventDefault(); e.stopPropagation();
+        if (dg.kind === "row") {
+            const src = findRow(node, dg.name);
+            if (src && src.gi >= 0) { removeRow(node, dg.name); node.__wm2Stack.push(src.entry); }
         }
-        return [width, h + 8];
-    };
-    node.__rowsDomWidget = domWidget;
+        clearMarks(node);
+        syncData(node);
+        renderRows(node, true);
+    });
+    // 键盘：↑↓ 选行 / Ctrl+↑↓ 移动 / Space 开关 / Del 删除
+    list.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.target.tagName === "INPUT") return;
+        const rows = allRows(node);
+        if (!rows.length) return;
+        const idx = rows.findIndex((r) => norm(r.entry.name) === node.__wm2Sel);
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            const d = e.key === "ArrowUp" ? -1 : 1;
+            if (e.ctrlKey && node.__wm2Sel) shiftRow(node, node.__wm2Sel, d);
+            else { const n = rows[Math.max(0, Math.min(rows.length - 1, (idx < 0 ? 0 : idx) + d))]; if (n) node.__wm2Sel = norm(n.entry.name); }
+            syncData(node);
+            renderRows(node, true);
+        } else if (e.key === " " && node.__wm2Sel) {
+            e.preventDefault();
+            const r = findRow(node, node.__wm2Sel);
+            if (r) { r.entry.on = !r.entry.on; syncData(node); renderRows(node, true); }
+        } else if (e.key === "Delete" && node.__wm2Sel) {
+            e.preventDefault();
+            removeRow(node, node.__wm2Sel);
+            node.__wm2Sel = null;
+            syncData(node);
+            renderRows(node, true);
+        }
+    });
 
-    if (node.__wmFolderBtn) updateFolderBtn(node.__wmFolderBtn, node);
-    renderRows(node);
-    attachResizeObserver(node, container);
+    // 3) 重名 / 上限提示条
+    const w = document.createElement("div");
+    w.className = "wm2-warn";
+    c.append(w);
+    node.__wm2Warn = w;
+
+    // 4) 底部：左正方形「新建配方」图标按钮 + 右 Add LoRA
+    const addrow = document.createElement("div");
+    addrow.className = "wm2-addrow";
+    const grpBtn = document.createElement("button");
+    grpBtn.type = "button";
+    grpBtn.className = "wm2-grpbtn";
+    grpBtn.title = "新建配方";
+    grpBtn.innerHTML = IC.folderPlus;
+    grpBtn.onclick = () => {
+        if (rowFull(node)) { warn(node, `已达上限 ${MAX_ROWS} 条`); return; }
+        node.__wm2Stack.push({ folder: uniqueGroupName(node), on: true, open: true, loras: [] });
+        syncData(node);
+        renderRows(node, true);
+        // 只建一个空配方，不弹 LoRA 选择框：组里有 Add LoRA 按钮，外面的行也能直接拖进来
+        if (node.__wm2List) node.__wm2List.scrollTop = node.__wm2List.scrollHeight;
+    };
+    const addBtn = document.createElement("button");
+    addBtn.type = "button";
+    addBtn.className = "wm2-addbtn";
+    addBtn.textContent = "＋ Add LoRA";
+    addBtn.onclick = () => openModal(node, -1);
+    addrow.append(grpBtn, addBtn);
+    c.append(addrow);
+
+    const domWidget = node.addDOMWidget("wm_lora_v2_ui", "div", c, { serialize: false });
+    // 上报常量高度（节点高度不随条目数变化），并记下可用宽度用于反解内边距
+    domWidget.computeSize = (width) => {
+        node.__wm2WidgetW = width;
+        return [width, UI_H];
+    };
+    node.__wm2DomWidget = domWidget;
+
+    ensureNodeFits(node);
+    refreshKnown(node);
 }
 
-//==============================================================================
-// 扩展注册
-//==============================================================================
+// 已知文件集合：用于「缺失即红」和候选列表
+function refreshKnown(node) {
+    return getLoraFiles().then((all) => {
+        node.__wm2All = all;
+        node.__wm2Known = new Set(all.map(norm));
+        if (node.__wm2Built) renderRows(node, true);
+    });
+}
+
 function patchNodeType(nodeType) {
-    const origONC = nodeType.prototype.onNodeCreated;
+    const origCreate = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
-        origONC?.apply(this, arguments);
-        try { buildCoreUI(this); }
-        catch (e) { console.warn("[WindMix] lora manager onNodeCreated failed", e); }
+        origCreate?.apply(this, arguments);
+        try { buildUI(this); } catch (e) { console.warn("[WindMix] lora ui onNodeCreated failed", e); }
     };
-    const origOConf = nodeType.prototype.onConfigure;
+    const origConf = nodeType.prototype.onConfigure;
     nodeType.prototype.onConfigure = function (info) {
-        origOConf?.apply(this, arguments);
+        origConf?.apply(this, arguments);
         try {
-            if (!this.__wmBuilt) buildCoreUI(this);
+            if (!this.__wm2Built) buildUI(this);
             loadStack(this);
-            renderRows(this);
-            if (this.__wmFolderBtn) updateFolderBtn(this.__wmFolderBtn, this);
-            scheduleResize(this);
-        } catch (e) { console.warn("[WindMix] lora manager onConfigure failed", e); }
+            renderRows(this, true);
+            ensureNodeFits(this);   // workflow 里存的尺寸可能比界面需要的矮
+        } catch (e) { console.warn("[WindMix] lora ui onConfigure failed", e); }
+    };
+    // 用户拖动节点边框改尺寸时：只有列表跟着变，底部按钮条与框底的距离锁死
+    const origResize = nodeType.prototype.onResize;
+    nodeType.prototype.onResize = function (size) {
+        origResize?.apply(this, arguments);
+        try { if (this.__wm2Built) lockBottomBar(this); } catch (e) {}
     };
 }
+
+document.addEventListener("pointerdown", (e) => {
+    if (_ac?.classList.contains("open") && !e.target.closest(".wm2-ac") && !e.target.closest(".wm2-search")) closeAc();
+}, true);
+// 弹窗没有可聚焦的遮罩，Escape 只能在 document 上兜底
+document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && _bd?.classList.contains("open")) { e.stopPropagation(); closeModal(); }
+}, true);
+// 滚动只重新贴合，绝不关下拉
+window.addEventListener("scroll", (e) => {
+    if (_ac?.classList.contains("open")) positionAc();
+    hidePv();
+}, true);
+window.addEventListener("resize", () => { if (_ac?.classList.contains("open")) positionAc(); hidePv(); });
 
 app.registerExtension({
     name: "windmix.lora.manager",
     beforeRegisterNodeDef(nodeType, nodeData) {
         if (NODE_TYPES.includes(nodeData?.name)) patchNodeType(nodeType);
+    },
+    setup() {
+        injectStyle();
     },
 });

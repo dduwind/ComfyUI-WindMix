@@ -1,922 +1,860 @@
 import { app } from "/scripts/app.js";
 
-console.log("[WindMix] xy_unet_manager.js loaded, url=", import.meta.url);
+// =============================================================================
+// UNet2（📊 XY 输入: UNet2 · WindMixUNetXY）的界面
+// 和 LoRA 卡片同一套设计：搜索即添加 + 固定高度内滚动列表 + 浏览弹窗，
+// 样式 / 图标 / 提示条 / 底距几何引擎都直接 import windmix_lora_manager.js 的共用件，
+// DOM 全部用 wm2-* 类，节点尺寸字段沿用 node.__wm2*（引擎按这套名字读缓存）。
+// 模型没有强度、没有 tag，也不分组，所以行上只有 手柄 / 开关 / 名称 / 删除。
+// 数据契约（隐藏 unet_data 控件，ComfyUI 自动序列化）：[{on,name}, ...]
+// =============================================================================
 
-// UNet2 (⚡ XY 输入: UNet2) 的 DOM 行 UI：文件夹筛选 + Add 模型 + 逐行[开关/名称/删除]。
-// 与 LoRA Stack 节点同源思路，但数据源是 diffusion_models、行只有模型名（无强度/tag）。
-// 数据持久化在隐藏的 `unet_data` STRING 控件里（前端读写 JSON，ComfyUI 自动序列化）。
+import {
+    injectStyle, IC, norm, dirOf, baseOf, hideWidget, warn, hlName,
+    canvasScale, measureChrome, lockBottomBar, ensureNodeFits,
+    UI_H, MIN_NODE_W, MAX_ROWS, PV_W, PV_H,
+} from "./windmix_lora_manager.js";
+
 const NODE_TYPES = ["WindMixUNetXY"];
 const DATA_WIDGET = "unet_data";
-const ROW_H = 40; // 单行(仅名称)估算高度兜底（computeSize 优先实测 DOM 高度）
+
+// 模型比 LoRA 多几种后缀，显示时都当成「扩展名」削掉
+const MODEL_EXT = /\.(safetensors|ckpt|pt|bin|pth|gguf|onnx)$/i;
+const stemOf = (n) => n.replace(MODEL_EXT, "");
+const extOf = (n) => { const m = n.match(MODEL_EXT); return m ? m[0] : ""; };
+const nameOf = (p) => stemOf(baseOf(p || ""));
 
 //==============================================================================
-// UNet 模型列表（后端 /windmix/unets）
+// 数据源（/windmix/unets = folder_paths 的 diffusion_models）
 //==============================================================================
-let _unetCache = null;
-async function getUnetFiles(force = false) {
-    if (_unetCache == null || force) {
+let _allCache = null;
+let _previewVer = 0;
+async function getModelFiles(force = false) {
+    if (_allCache == null || force) {
         try {
             const r = await fetch("/windmix/unets");
             const j = await r.json();
-            _unetCache = Array.isArray(j.unets) ? j.unets : [];
+            _allCache = Array.isArray(j.unets) ? j.unets : [];
         } catch (e) {
-            _unetCache = [];
+            _allCache = [];
         }
     }
-    return _unetCache || [];
+    return _allCache || [];
 }
 
-// 监听 ComfyUI 刷新（按 R）时清空模型缓存，使新下载 / 换文件夹的模型立即可见
-if (app.refreshComboInsp) {
-    const _origUnetRefresh = app.refreshComboInsp.bind(app);
-    app.refreshComboInsp = function (...args) {
-        _unetCache = null;
-        _previewVer += 1; // 换图 / 新下载后让浏览器重新取图（URL 上的 v 变化）
-        return _origUnetRefresh(...args);
+if (app.refreshCombo) {
+    const _orig = app.refreshCombo.bind(app);
+    app.refreshCombo = function (...args) {
+        _allCache = null;
+        _previewVer += 1;
+        return _orig(...args);
     };
 }
 
-//==============================================================================
-// 模型预览图：只认「模型同目录的同名图片」，由 WindMix 自己的后端提供
-//   GET /WM_studio/prompt-studio/model-preview?type=diffusion_models&name=<相对路径>
-// UNet2 的列表来自 diffusion_models（后端 /windmix/unets），后端 _resolve_model_path
-// 已放开任意 folder_paths 类型，故这里传 diffusion_models 即可。
-// 找不到同名图返回 404 → 浮窗整个不显示。刻意不接外部插件（曾用 /api/lm/...）。
-//==============================================================================
-const WM_PREVIEW_TYPE = "diffusion_models";
-let _previewVer = 0; // 按 R 刷新时 +1，绕过浏览器 1 小时的图片缓存
-
-// 候选 src 列表；后端 404 时 applyImgCandidates 会把浮窗隐藏（不留空框）
-async function previewCandidates(name) {
-    if (!name || name === "None") return [];
-    return [
-        `/WM_studio/prompt-studio/model-preview?type=${WM_PREVIEW_TYPE}` +
-            `&name=${encodeURIComponent(name)}&v=${_previewVer}`,
-    ];
-}
-
-// img 依次尝试候选 src，全部失败则隐藏（不留占位）；onFail 为最终失败回调
-function applyImgCandidates(img, cands, onFail) {
-    let i = 0;
-    img.style.display = "";
-    img.onerror = () => {
-        i += 1;
-        if (i < cands.length) img.src = cands[i];
-        else { img.style.display = "none"; if (onFail) onFail(); }
-    };
-    if (cands.length) img.src = cands[0];
-    else { img.style.display = "none"; if (onFail) onFail(); }
-}
-
-// ---- hover 预览浮窗（单例，跟随鼠标；悬停行内模型名 / 选择器条目时显示）----
-let _previewPop = null;
-let _popToken = 0;
-function getPreviewPop() {
-    if (!_previewPop || !_previewPop.isConnected) {
-        _previewPop = document.createElement("div");
-        _previewPop.className = "wm-xy-preview";
-        _previewPop.style.display = "none";
-        _previewPop.append(document.createElement("img"));
-        document.body.append(_previewPop);
-    }
-    return _previewPop;
-}
-function movePreviewPop(e) {
-    if (!_previewPop || _previewPop.style.display === "none") return;
-    const w = _previewPop.offsetWidth || 300;
-    const h = _previewPop.offsetHeight || 240;
-    let x = e.clientX + 18, y = e.clientY + 14;
-    if (x + w > window.innerWidth - 8) x = Math.max(8, e.clientX - w - 18);
-    if (y + h > window.innerHeight - 8) y = Math.max(8, window.innerHeight - h - 8);
-    _previewPop.style.left = x + "px";
-    _previewPop.style.top = y + "px";
-}
-function showPreviewPop(name, e) {
-    const tok = ++_popToken;
-    previewCandidates(name).then((c) => {
-        if (tok !== _popToken || !c.length) return;
-        const pop = getPreviewPop();
-        pop.style.display = "block";
-        applyImgCandidates(pop.firstChild, c, () => hidePreviewPop());
-        movePreviewPop(e);
-    });
-}
-function hidePreviewPop() {
-    _popToken += 1; // 使途中的异步结果作废
-    if (_previewPop) {
-        _previewPop.style.display = "none";
-        _previewPop.firstChild.removeAttribute("src");
-    }
+// 预览图同样只认「模型同目录同名图片」，走 WindMix 自己的路由
+function previewUrl(name) {
+    return `/WM_studio/prompt-studio/model-preview?type=diffusion_models` +
+        `&name=${encodeURIComponent(name)}&v=${_previewVer}`;
 }
 
 //==============================================================================
-// 路径 / 文件夹工具
-//==============================================================================
-function norm(p) {
-    return (p || "").replace(/\\/g, "/");
-}
-function folderOf(path) {
-    const np = norm(path);
-    const i = np.lastIndexOf("/");
-    return i >= 0 ? np.slice(0, i + 1) : "";
-}
-function basename(p) {
-    const parts = norm(p).split("/");
-    return parts[parts.length - 1] || p;
-}
-function enabledSetOf(node) {
-    const f = node.__folderFilter;
-    if (!Array.isArray(f) || f.length === 0) return null; // null = 全部
-    // 根目录 "" 在匹配语义里代表"全部"，若与具体子目录并存会覆盖成不过滤，
-    // 故防御性丢弃 ""，仅保留具体目录前缀。
-    const cleaned = f.filter((x) => x !== "");
-    if (cleaned.length === 0) return null;
-    return new Set(cleaned.map(norm));
-}
-function itemsInFolders(all, set) {
-    if (!set) return all.slice();
-    return all.filter((p) => {
-        const d = folderOf(p);
-        for (const f of set) {
-            const nf = norm(f);
-            if (nf === "" || d === nf || d.startsWith(nf)) return true;
-        }
-        return false;
-    });
-}
-
-//==============================================================================
-// 数据持久化（隐藏 unet_data 控件）
+// 数据读写
 //==============================================================================
 function getDataWidget(node) {
     return (node.widgets || []).find((w) => w.name === DATA_WIDGET);
 }
-function hideWidget(node, w) {
-    if (!w) return;
-    // ---- Nodes 1.0（litegraph 画布，读 widget.hidden）----
-    w.computeSize = () => [0, -4];
-    w.type = "wm_hidden";
-    w.hidden = true;
-    if (w.element) w.element.style.display = "none";
-    w._origDraw = w.draw;
-    w.draw = function () {};
-    // ---- Nodes 2.0（Vue，只认响应式 state 的 options.hidden，不看 widget.hidden）----
-    // _state 常晚于 nodeCreated 就绪：先写裸 options 兜底，轮询到 _state 后再写代理，
-    // 并替换整个 options 引用强制 Vue 重新求值（与 widgethider.js 同一手法）。
-    const applyState = () => {
-        if (w._state && w._state.options) {
-            w._state.options.hidden = true;
-            try { w._state.options = { ...w._state.options, hidden: true }; } catch (e) {}
-        }
-    };
-    if (w._state) {
-        applyState();
-    } else if (w.options) {
-        w.options.hidden = true;
-        if (!w._wmStateRetry) {
-            w._wmStateRetry = true;
-            let tries = 0;
-            const tick = () => {
-                if (w._state) { applyState(); w._wmStateRetry = false; return; }
-                if (tries++ < 120) requestAnimationFrame(tick);
-                else w._wmStateRetry = false;
-            };
-            requestAnimationFrame(tick);
-        }
-    }
-}
+
 function loadStack(node) {
     const w = getDataWidget(node);
     let arr = [];
     try {
         const p = JSON.parse(w?.value || "[]");
-        arr = Array.isArray(p) ? p : (p.models || []);
+        arr = Array.isArray(p) ? p : (p && Array.isArray(p.models) ? p.models : (p && Array.isArray(p.loras) ? p.loras : []));
     } catch (e) {
         arr = [];
     }
-    node.__unetStack = arr
-        .filter((e) => e && typeof e === "object")
-        .map((e) => ({
-            on: e.on !== false,
-            name: (e.name || "").toString(),
-        }));
-    node.__folderFilter = Array.isArray(node.properties?.folder_filter)
-        ? node.properties.folder_filter
-        : null;
+    // 旧版顶部的「文件夹筛选」已经并进弹窗和搜索了，属性里那份残留不再写回
+    if (node.properties && "folder_filter" in node.properties) delete node.properties.folder_filter;
+
+    const out = [];
+    const seen = new Set();
+    const push = (e) => {
+        if (!e || typeof e !== "object") return;
+        if (Array.isArray(e.loras)) { e.loras.forEach(push); return; }   // 老数据里若有分组，就地摊平
+        const name = (e.name || "").toString();
+        if (!name || seen.has(norm(name))) return;
+        seen.add(norm(name));
+        out.push({ on: e.on !== false, name });
+    };
+    arr.forEach(push);
+    node.__xyStack = out;
+    node.__xySel = node.__xySel || null;
+    node.__xyKw = "";
 }
+
 function syncData(node) {
     const w = getDataWidget(node);
     if (!w) return;
-    w.value = JSON.stringify(node.__unetStack || []);
-    if (!node.properties) node.properties = {};
-    node.properties.folder_filter = Array.isArray(node.__folderFilter) ? node.__folderFilter : [];
+    w.value = JSON.stringify((node.__xyStack || []).map((e) => ({ on: e.on !== false, name: e.name })));
+    node.setDirtyCanvas?.(true, false);
+}
+
+const allRows = (node) => node.__xyStack || [];
+const activeRows = (node) => allRows(node).filter((r) => r.on);
+const usedPaths = (node) => new Set(allRows(node).map((r) => norm(r.name)).filter(Boolean));
+const findRow = (node, name) => allRows(node).find((r) => norm(r.name) === norm(name)) || null;
+const rowFull = (node) => allRows(node).length >= MAX_ROWS;
+const isMissing = (node, name) => !!name && node.__xyKnown && !node.__xyKnown.has(norm(name));
+
+function removeRow(node, name) {
+    const i = allRows(node).findIndex((r) => norm(r.name) === norm(name));
+    if (i >= 0) node.__xyStack.splice(i, 1);
+}
+function shiftRow(node, name, d) {
+    const rows = allRows(node), i = rows.findIndex((r) => norm(r.name) === norm(name));
+    const j = i + d;
+    if (i < 0 || j < 0 || j >= rows.length) return;
+    rows.splice(j, 0, rows.splice(i, 1)[0]);
+}
+// 拖到某行的上半区插在前面，下半区插在后面
+function moveRow(node, fromName, toEntry, after) {
+    const src = findRow(node, fromName);
+    if (!src || src === toEntry) return;
+    removeRow(node, fromName);
+    const i = allRows(node).indexOf(toEntry);
+    if (i < 0) { node.__xyStack.push(src); return; }
+    node.__xyStack.splice(after ? i + 1 : i, 0, src);
 }
 
 //==============================================================================
-// 文件夹树弹窗（复刻 LoRA 节点的纯文件夹树勾选，数据源 unets）
+// body 级浮层：候选下拉 / 悬停预览（各自单例，和 LoRA 那两套并行存在）
 //==============================================================================
-function buildTree(all) {
-    const root = { folders: {}, files: [], fileCount: 0, prefix: "", name: "(根目录)", _open: true };
-    const ensure = (prefix) => {
-        if (!prefix) return root;
-        const parts = prefix.replace(/\/$/, "").split("/");
-        let n = root;
-        let acc = "";
-        for (const p of parts) {
-            acc += p + "/";
-            if (!n.folders[p]) n.folders[p] = { folders: {}, files: [], fileCount: 0, prefix: acc, name: p, _open: false };
-            n = n.folders[p];
-        }
-        return n;
-    };
-    for (const path of all) {
-        const np = norm(path);
-        const idx = np.lastIndexOf("/");
-        const dir = idx >= 0 ? np.slice(0, idx + 1) : "";
-        const n = ensure(dir);
-        n.files.push(path);
-        n.fileCount++;
+let _ac = null, _acNode = null, _acItems = [], _acIdx = 0;
+function getAc() {
+    if (!_ac) {
+        _ac = document.createElement("div");
+        _ac.className = "wm2-ac";
+        _ac.addEventListener("mousedown", (e) => { if (e.target.closest(".it")) e.preventDefault(); });
+        _ac.addEventListener("click", (e) => {
+            const it = e.target.closest(".it");
+            if (!it || !_acNode) return;
+            pickAc(_acNode, it.dataset.p);
+        });
+        _ac.addEventListener("mouseover", (e) => {
+            const it = e.target.closest(".it");
+            if (!it) return;
+            _ac.querySelectorAll(".it.hi").forEach((x) => x.classList.remove("hi"));
+            it.classList.add("hi");
+        });
+        document.body.append(_ac);
     }
-    return root;
+    return _ac;
 }
-function collectPrefixes(node, out) {
-    out.add(node.prefix);
-    for (const c of Object.values(node.folders)) collectPrefixes(c, out);
-    return out;
+function closeAc() {
+    if (_ac) _ac.classList.remove("open");
+    _acNode = null;
 }
-function openFolderModal(node, current, onApply) {
-    injectStyle();
-    getUnetFiles(true).then((all) => {
-        const tree = buildTree(all);
-        const selected = new Set(current && current.length ? current : collectPrefixes(tree, new Set()));
-
-        let backdrop = document.getElementById("wm_unet_folder_modal");
-        if (backdrop) backdrop.remove();
-        backdrop = document.createElement("div");
-        backdrop.id = "wm_unet_folder_modal";
-        backdrop.className = "wm-xy-folder-backdrop";
-        backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
-
-        const dialog = document.createElement("div");
-        dialog.className = "wm-xy-folder-dialog";
-
-        const header = document.createElement("div");
-        header.className = "wm-xy-folder-header";
-        const title = document.createElement("div");
-        title.className = "wm-xy-folder-title";
-        title.textContent = "选择模型文件夹";
-        const closeBtn = document.createElement("div");
-        closeBtn.className = "wm-xy-folder-close";
-        closeBtn.textContent = "✕";
-        closeBtn.onclick = () => backdrop.remove();
-        header.append(title, closeBtn);
-
-        const toolbar = document.createElement("div");
-        toolbar.className = "wm-xy-folder-toolbar";
-        const mkBtn = (label) => {
-            const b = document.createElement("button");
-            b.type = "button";
-            b.className = "wm-xy-btn";
-            b.textContent = label;
-            return b;
-        };
-        const selAll = mkBtn("全选");
-        const selNone = mkBtn("全不选");
-        selAll.onclick = () => { collectPrefixes(tree, selected); renderTree(); };
-        selNone.onclick = () => { selected.clear(); renderTree(); };
-        toolbar.append(selAll, selNone);
-
-        const treeBox = document.createElement("div");
-        treeBox.className = "wm-xy-folder-tree";
-
-        function renderTree() {
-            treeBox.innerHTML = "";
-            const renderNode = (n, depth) => {
-                const row = document.createElement("div");
-                row.className = "wm-xy-folder-row";
-                row.style.marginLeft = depth * 14 + "px";
-                const tri = document.createElement("span");
-                tri.textContent = n._open === false ? "▸" : "▾";
-                tri.className = "wm-xy-folder-tri";
-                const cb = document.createElement("input");
-                cb.type = "checkbox";
-                cb.className = "wm-xy-folder-cb";
-                cb.checked = selected.has(n.prefix);
-                cb.onchange = () => {
-                    const desc = collectPrefixes(n, new Set());
-                    if (cb.checked) desc.forEach((p) => selected.add(p));
-                    else desc.forEach((p) => selected.delete(p));
-                    renderTree();
-                };
-                const label = document.createElement("span");
-                label.className = "wm-xy-folder-label";
-                label.textContent = n.name;
-                const cnt = document.createElement("span");
-                cnt.className = "wm-xy-folder-cnt";
-                cnt.textContent = "(" + n.fileCount + ")";
-                tri.onclick = () => { n._open = n._open === false ? true : false; renderTree(); };
-                row.append(tri, cb, label, cnt);
-                treeBox.append(row);
-                if (n._open !== false) {
-                    for (const child of Object.values(n.folders)) renderNode(child, depth + 1);
-                }
-            };
-            renderNode(tree, 0);
-        }
-        renderTree();
-
-        const footer = document.createElement("div");
-        footer.className = "wm-xy-folder-footer";
-        const cancel = mkBtn("取消");
-        cancel.style.flex = "0 0 auto";
-        cancel.style.padding = "6px 18px";
-        cancel.onclick = () => backdrop.remove();
-        const apply = mkBtn("应用");
-        apply.className = "wm-xy-btn wm-xy-btn-primary";
-        apply.onclick = () => {
-            const allPrefixes = collectPrefixes(tree, new Set());
-            // 丢根目录 ""，仅保留具体子目录。根目录与具体目录并存时，根目录会
-            // 在匹配时覆盖成"全部"，必须剔除，否则筛选失效（见 enabledSetOf）。
-            const nonRoot = [...selected].filter((p) => p !== "");
-            const selHasAll = [...selected].sort().join("|") === [...allPrefixes].sort().join("|");
-            const isAll = nonRoot.length === 0 || selHasAll;
-            onApply(isAll ? null : nonRoot, isAll);
-            backdrop.remove();
-        };
-        footer.append(cancel, apply);
-
-        dialog.append(header, toolbar, treeBox, footer);
-        backdrop.append(dialog);
-        document.body.append(backdrop);
-    });
+// 下拉和节点同宽、跟着画布缩放，位置贴着搜索框下方
+function positionAc() {
+    if (!_ac || !_acNode) return;
+    const anchor = _acNode.__wm2Search || _acNode.__wm2SearchInput;
+    if (!anchor?.getBoundingClientRect) return;
+    const r = anchor.getBoundingClientRect();
+    const k = canvasScale(_acNode) || 1;
+    const cont = _acNode.__wm2Container;
+    let w = NaN;
+    if (cont) w = cont.getBoundingClientRect().width / k;
+    if (!Number.isFinite(w) || w < 160) w = Math.max(240, Math.round(r.width / k));
+    _ac.style.width = Math.round(w) + "px";
+    _ac.style.transform = `scale(${k})`;
+    _ac.style.transformOrigin = "top left";
+    _ac.style.left = Math.max(6, Math.min(r.left, window.innerWidth - 40)) + "px";
+    _ac.style.top = r.bottom + 5 * k + "px";
 }
-
-//==============================================================================
-// 模型选择器（点名称/Add 模型时弹出，按文件夹筛选 + 搜索）
-//==============================================================================
-let _chooserEl = null;
-let _chooserDocHandler = null;
-function closeChooser() {
-    hidePreviewPop();
-    if (_chooserEl) { _chooserEl.remove(); _chooserEl = null; }
-    if (_chooserDocHandler) {
-        window.removeEventListener("pointerdown", _chooserDocHandler, true);
-        _chooserDocHandler = null;
-    }
+function acMatches(node) {
+    const kw = (node.__xyKw || "").trim().toLowerCase();
+    const used = usedPaths(node);
+    let items = (node.__xyAll || []).filter((p) => !used.has(norm(p)));
+    if (kw) items = items.filter((p) => norm(p).toLowerCase().includes(kw) || nameOf(p).toLowerCase().includes(kw));
+    const folds = new Map();
+    items.forEach((p) => { const d = dirOf(p); if (!folds.has(d)) folds.set(d, []); folds.get(d).push(p); });
+    return [...folds.entries()];
 }
-function showChooser(node, onChoose, onCancel) {
-    injectStyle();
-    closeChooser();
-    getUnetFiles(true).then((all) => {
-        const set = enabledSetOf(node);
-        const models = itemsInFolders(all, set);
-
-        const panel = document.createElement("div");
-        panel.className = "wm-xy-chooser";
-
-        const header = document.createElement("div");
-        header.className = "wm-xy-chooser-header";
-        const t = document.createElement("span");
-        t.className = "wm-xy-chooser-title";
-        t.textContent = "选择模型";
-        const x = document.createElement("span");
-        x.className = "wm-xy-chooser-close";
-        x.textContent = "✕";
-        x.onclick = () => { closeChooser(); if (typeof onCancel === "function") onCancel(); };
-        header.append(t, x);
-        panel.append(header);
-
-        const body = document.createElement("div");
-        body.className = "wm-xy-chooser-body";
-        const side = document.createElement("div");
-        side.className = "wm-xy-chooser-side";
-        const main = document.createElement("div");
-        main.className = "wm-xy-chooser-main";
-
-        const search = document.createElement("input");
-        search.className = "wm-xy-chooser-search";
-        search.placeholder = "搜索…";
-
-        const list = document.createElement("div");
-        list.className = "wm-xy-chooser-list";
-
-        // 文件夹侧栏（全部 + 各文件夹，含数量徽标）
-        let curDir = null; // null = 全部
-        const sideItems = [];
-        const dirLabel = (d) => {
-            if (!d) return "(根目录)";
-            const parts = String(d).replace(/\/$/, "").split("/");
-            return parts[parts.length - 1] || d;
-        };
-        const mkSide = (label, dir, count) => {
-            const it = document.createElement("div");
-            it.className = "wm-xy-chooser-side-item" + (dir === null ? " active" : "");
-            const lbl = document.createElement("span");
-            lbl.className = "lbl";
-            lbl.textContent = label;
-            const n = document.createElement("span");
-            n.className = "n";
-            n.textContent = count;
-            it.append(lbl, n);
-            it.title = dir === null ? "全部模型" : dir;
-            it.__dir = dir;
-            it.onclick = () => {
-                curDir = dir;
-                sideItems.forEach((s) => s.classList.toggle("active", s.__dir === dir));
-                render(search.value);
-            };
-            sideItems.push(it);
-            side.append(it);
-        };
-        mkSide("全部", null, models.length);
-        const dirs = new Map();
-        for (const path of models) {
-            const d = folderOf(path);
-            dirs.set(d, (dirs.get(d) || 0) + 1);
-        }
-        for (const [d, c] of [...dirs.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-            mkSide(dirLabel(d), d, c);
-        }
-
-        const foot = document.createElement("div");
-        foot.className = "wm-xy-chooser-foot";
-
-        main.append(search, list, foot);
-        body.append(side, main);
-        panel.append(body);
-
-        const render = (q) => {
-            list.innerHTML = "";
-            const ql = (q || "").trim().toLowerCase();
-            let vis = curDir ? models.filter((p) => folderOf(p).startsWith(curDir)) : models.slice();
-            if (ql) vis = vis.filter((l) => l.toLowerCase().includes(ql));
-            foot.textContent = `共 ${vis.length} 个 · ${curDir === null ? "全部" : dirLabel(curDir)}`
-                + (set ? ` · 已按 ${set.size} 个文件夹筛选` : "");
-            if (!vis.length) {
-                const empty = document.createElement("div");
-                empty.className = "wm-xy-chooser-empty";
-                empty.textContent = curDir !== null && !ql ? "该文件夹内无模型" : (set ? "所选文件夹内无模型" : "无模型");
-                list.append(empty);
-                return;
-            }
-            for (const path of vis) {
-                const item = document.createElement("div");
-                item.className = "wm-xy-chooser-item";
-                item.textContent = basename(path);
-                item.title = path;
-                item.onclick = () => {
-                    onChoose(path);
-                    closeChooser();
-                };
-                // hover 预览：跟随鼠标的预览图浮窗（无预览时静默不显示）
-                item.addEventListener("mouseenter", (e) => showPreviewPop(path, e));
-                item.addEventListener("mousemove", movePreviewPop);
-                item.addEventListener("mouseleave", hidePreviewPop);
-                list.append(item);
-            }
-        };
-        render("");
-        search.oninput = () => render(search.value);
-
-        document.body.append(panel);
-        _chooserEl = panel;
-        // 点击弹窗外部（空白处/其他节点）→ 关闭并取消本次添加。
-        _chooserDocHandler = (e) => {
-            if (_chooserEl && !_chooserEl.contains(e.target)) {
-                closeChooser();
-                if (typeof onCancel === "function") onCancel();
-            }
-        };
-        setTimeout(() => window.addEventListener("pointerdown", _chooserDocHandler, true), 0);
-        requestAnimationFrame(() => {
-            const w = panel.offsetWidth, h = panel.offsetHeight;
-            panel.style.left = Math.max(10, (window.innerWidth - w) / 2) + "px";
-            panel.style.top = Math.max(10, (window.innerHeight - h) / 2 - 60) + "px";
+function renderAc(node) {
+    const ac = getAc();
+    // LoRA 节点那份下拉是独立单例，两边不能同时挂着
+    document.querySelectorAll(".wm2-ac.open").forEach((x) => { if (x !== ac) x.classList.remove("open"); });
+    _acNode = node;
+    const kw = (node.__xyKw || "").trim();
+    _acItems = [];
+    let html = "";
+    acMatches(node).forEach(([f, list]) => {
+        html += `<div class="fold">${IC.folder} ${f ? f.replace(/&/g, "&amp;") : "根目录"}</div>`;
+        list.forEach((p) => {
+            if (_acItems.length >= 20) return;
+            const idx = _acItems.push(p) - 1;
+            html += `<div class="it${idx === _acIdx ? " hi" : ""}" data-p="${p.replace(/"/g, "&quot;")}">
+              <span class="th">${nameOf(p).slice(0, 2).toUpperCase()}</span>
+              <span class="nm">${hlName(nameOf(p), kw)}</span>
+            </div>`;
         });
     });
+    if (!_acItems.length) html = `<div class="none">${node.__xyKw ? "无匹配结果（已添加的不再出现）" : "库里没有可选的模型"}</div>`;
+    else html += `<div class="foot"><span>↑↓ 选择</span><span>Enter 添加</span><span>Esc 收起</span><span style="margin-left:auto">最多 20 条</span></div>`;
+    ac.innerHTML = html;
+    positionAc();
+    ac.classList.add("open");
+}
+function acMove(d) {
+    if (!_acItems.length) return;
+    _acIdx = Math.max(0, Math.min(_acIdx + d, _acItems.length - 1));
+    if (_acNode) renderAc(_acNode);
+}
+function pickAc(node, path) {
+    if (!path) return;
+    node.__xyKw = "";
+    if (node.__wm2SearchInput) node.__wm2SearchInput.value = "";
+    node.__wm2Search?.classList.remove("has-q");
+    addEntry(node, path);
+    closeAc();
 }
 
-//==============================================================================
-// 行渲染
-//==============================================================================
-let _styleInjected = false;
-function injectStyle() {
-    if (_styleInjected) return;
-    _styleInjected = true;
-    const s = document.createElement("style");
-    s.textContent = `
-/* ---- 主题令牌（与 LoRA 节点同一套 --wm-lo-* 双主题变量） ---- */
-.wm-xy-container, .wm-xy-chooser, .wm-xy-folder-dialog, .wm-xy-preview {
-  --wm-lo-brand: #534AB7;
-  --wm-lo-accent: #534AB7;
-  --wm-lo-panel: #f2f2f3;
-  --wm-lo-field: #ffffff;
-  --wm-lo-fg: #1f1f21;
-  --wm-lo-dim: #85858c;
-  --wm-lo-line: #d8d8dc;
-  --wm-lo-line2: #c6c6cd;
-  --wm-lo-danger: #c0392b;
-  --wm-lo-shadow: 0 8px 30px rgba(0,0,0,.18);
+let _pv = null, _pvTimer = null, _pvToken = 0;
+function getPv() {
+    if (!_pv) {
+        _pv = document.createElement("div");
+        _pv.className = "wm2-pv";
+        _pv.innerHTML = `<div class="img"></div>`;
+        document.body.append(_pv);
+    }
+    return _pv;
 }
-html.dark-theme .wm-xy-container, html.dark-theme .wm-xy-chooser,
-html.dark-theme .wm-xy-folder-dialog, html.dark-theme .wm-xy-preview {
-  --wm-lo-accent: #9b8af5;
-  --wm-lo-panel: #2a2a2a;
-  --wm-lo-field: #1e1e1e;
-  --wm-lo-fg: #e6e6e6;
-  --wm-lo-dim: #9a9a9a;
-  --wm-lo-line: #3a3a3a;
-  --wm-lo-line2: #454545;
-  --wm-lo-danger: #e57373;
-  --wm-lo-shadow: 0 8px 30px rgba(0,0,0,.5);
+function positionPv(anchor) {
+    const pv = getPv();
+    const r = anchor.getBoundingClientRect();
+    const GAP = 10;
+    let left = r.right + GAP;
+    const modalEl = anchor.closest(".wm2-modal");
+    if (modalEl) {
+        const mr = modalEl.getBoundingClientRect();
+        const fit = mr.right - PV_W - 8;
+        if (left > fit && fit >= mr.left + 8) left = fit;
+        else if (left + PV_W > window.innerWidth - 8) left = r.left - PV_W - GAP;
+    } else if (left + PV_W > window.innerWidth - 8) {
+        left = r.left - PV_W - GAP;
+    }
+    left = Math.max(8, Math.min(left, window.innerWidth - PV_W - 8));
+    pv.style.left = left + "px";
+    pv.style.top = Math.max(8, Math.min(r.top - 10, window.innerHeight - PV_H - 8)) + "px";
 }
-
-/* ---- WindMix UNet2 节点（与 LoRA 节点同源样式） ---- */
-.wm-xy-container { display:flex; flex-direction:column; gap:6px; padding-bottom:8px; }
-
-.wm-xy-folderbtn { display:flex; align-items:center; gap:6px; width:100%; min-width:0; min-height:34px; line-height:1;
-  background:var(--wm-lo-field, #1e1e1e); color:var(--wm-lo-fg, #e6e6e6);
-  border:1px solid var(--border-color, #444); border-radius:8px; padding:7px 10px; box-sizing:border-box;
-  cursor:pointer; font-size:12px; margin-bottom:2px; text-align:left;
-  transition:border-color .15s ease, background .15s ease; }
-.wm-xy-folderbtn:hover { border-color:var(--wm-lo-accent, #9b8af5); background:rgba(83,74,183,0.08); }
-.wm-xy-fb-ic { display:inline-flex; align-items:center; font-size:13px; line-height:1; }
-.wm-xy-fb-txt { line-height:1; }
-.wm-xy-fb-badge { margin-left:auto; background:var(--wm-lo-brand, #534AB7); color:#fff; border-radius:999px;
-  padding:1px 8px; font-size:11px; line-height:14px; font-weight:600; flex:none; }
-.wm-xy-fb-badge.off { background:var(--wm-lo-line2, #454545); color:var(--wm-lo-fg, #e6e6e6); font-weight:500; }
-.wm-xy-fb-chev { color:var(--wm-lo-dim, #9a9a9a); font-size:10px; flex:none; }
-
-.wm-xy-rows { display:flex; flex-direction:column; gap:2px; }
-
-.wm-xy-row { display:flex; align-items:stretch; gap:8px; padding:4px 6px; border-radius:8px;
-  transition:background .15s ease; }
-.wm-xy-row:hover { background:rgba(83,74,183,0.06); }
-.wm-xy-row .wm-xy-on { width:15px; height:15px; flex:none; cursor:pointer; align-self:center;
-  accent-color:var(--wm-lo-accent, #9b8af5); }
-.wm-xy-row .wm-xy-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-  background:var(--wm-lo-field, #1e1e1e); border:1px solid var(--border-color, #444); border-radius:6px;
-  padding:6px 8px; cursor:pointer; color:var(--wm-lo-fg, #e6e6e6); font-size:12px; box-sizing:border-box;
-  transition:border-color .15s ease, background .15s ease; }
-.wm-xy-row .wm-xy-name:hover { border-color:var(--wm-lo-accent, #9b8af5); background:rgba(83,74,183,0.10); }
-.wm-xy-row .wm-xy-name:focus-visible { outline:2px solid var(--wm-lo-accent, #9b8af5); outline-offset:1px; }
-.wm-xy-row .wm-xy-del { flex:none; cursor:pointer; color:var(--wm-lo-danger, #e57373); padding:3px 6px; border-radius:6px; font-size:12px;
-  border:2px solid var(--border-color, #444); background:var(--wm-lo-field, #1e1e1e);
-  display:inline-flex; align-items:center; justify-content:center; min-width:24px; line-height:1; font-weight:600; box-sizing:border-box;
-  transition:background .15s ease, border-color .15s ease; }
-.wm-xy-row .wm-xy-del:hover { background:rgba(229,115,115,0.15); border-color:var(--wm-lo-danger, #e57373); }
-
-.wm-xy-hint { color:var(--wm-lo-fg, #e6e6e6); opacity:0.55; font-size:12px; padding:8px 4px; font-style:italic; }
-
-.wm-xy-add { width:100%; margin-top:10px; margin-bottom:2px; padding:8px 0;
-  background:transparent; color:var(--wm-lo-accent, #9b8af5);
-  border:1px solid var(--wm-lo-accent, #9b8af5); border-radius:8px;
-  cursor:pointer; font-size:12px; font-weight:600;
-  transition:background .15s ease, border-color .15s ease; }
-.wm-xy-add:hover { background:rgba(83,74,183,0.18); border-color:var(--wm-lo-accent, #9b8af5); }
-.wm-xy-add:active { background:rgba(83,74,183,0.28); }
-
-/* ---- 选模型弹窗 ---- */
-.wm-xy-chooser { position:fixed; z-index:10001; width:620px; max-width:92vw; max-height:62vh; overflow:hidden;
-  background:var(--wm-lo-panel, #2a2a2a); color:var(--wm-lo-fg, #e6e6e6);
-  border:1px solid var(--border-color, #444); border-radius:10px;
-  box-shadow:0 8px 30px rgba(0,0,0,0.5); font-family:sans-serif; font-size:12px;
-  display:flex; flex-direction:column; }
-.wm-xy-chooser-body { display:flex; flex:1; min-height:0; }
-.wm-xy-chooser-side { flex:0 0 168px; border-right:1px solid var(--border-color, #444);
-  overflow-y:auto; padding:6px; }
-.wm-xy-chooser-side-item { display:flex; align-items:center; gap:6px; padding:6px 8px;
-  border-radius:6px; cursor:pointer; font-size:12px; }
-.wm-xy-chooser-side-item:hover { background:rgba(83,74,183,0.10); }
-.wm-xy-chooser-side-item.active { background:rgba(83,74,183,0.22); }
-.wm-xy-chooser-side-item .lbl { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.wm-xy-chooser-side-item .n { flex:none; font-size:11px; opacity:0.65; }
-.wm-xy-chooser-main { flex:1; min-width:0; display:flex; flex-direction:column; }
-.wm-xy-chooser-foot { padding:6px 12px; border-top:1px solid var(--border-color, #444);
-  font-size:11px; opacity:0.65; }
-.wm-xy-chooser-header { display:flex; align-items:center; justify-content:space-between;
-  padding:9px 12px; border-bottom:1px solid var(--border-color, #444); }
-.wm-xy-chooser-title { font-size:13px; font-weight:500; }
-.wm-xy-chooser-close { cursor:pointer; color:var(--wm-lo-fg, #e6e6e6); opacity:0.6; padding:2px 6px; border-radius:6px;
-  transition:background .15s ease, opacity .15s ease; }
-.wm-xy-chooser-close:hover { background:rgba(255,255,255,0.08); opacity:1; }
-.wm-xy-chooser-search { width:calc(100% - 20px); margin:8px 10px; padding:6px 8px;
-  background:var(--wm-lo-field, #1e1e1e); color:var(--wm-lo-fg, #e6e6e6);
-  border:1px solid var(--border-color, #444); border-radius:6px; box-sizing:border-box;
-  font-size:12px; transition:border-color .15s ease; }
-.wm-xy-chooser-search:focus { outline:none; border-color:var(--wm-lo-accent, #9b8af5); }
-.wm-xy-chooser-list { flex:1; overflow-y:auto; padding-bottom:6px; }
-.wm-xy-chooser-item { padding:7px 12px; cursor:pointer; border-bottom:1px solid var(--border-color, #444);
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-  transition:background .12s ease, color .12s ease; }
-.wm-xy-chooser-item:last-child { border-bottom:none; }
-.wm-xy-chooser-item:hover { background:rgba(83,74,183,0.10); }
-.wm-xy-chooser-empty { padding:12px; color:var(--wm-lo-fg, #e6e6e6); opacity:0.6; }
-
-/* ---- 文件夹树弹窗 ---- */
-.wm-xy-folder-backdrop { position:fixed; left:0; top:0; width:100%; height:100%;
-  background:rgba(15,17,26,0.45); z-index:10000; display:flex; align-items:center; justify-content:center; }
-.wm-xy-folder-dialog { background:var(--wm-lo-panel, #2a2a2a); color:var(--wm-lo-fg, #e6e6e6);
-  border-radius:12px; width:454px; max-width:92vw; max-height:86vh; display:flex; flex-direction:column;
-  font-family:sans-serif; box-shadow:0 8px 30px rgba(0,0,0,0.5); overflow:hidden; }
-.wm-xy-folder-header { display:flex; align-items:center; justify-content:space-between;
-  padding:12px 16px; border-bottom:1px solid var(--border-color, #444); }
-.wm-xy-folder-title { font-size:14px; font-weight:500; }
-.wm-xy-folder-close { cursor:pointer; color:var(--wm-lo-fg, #e6e6e6); opacity:0.6; padding:2px 6px; border-radius:6px;
-  transition:background .15s ease, opacity .15s ease; }
-.wm-xy-folder-close:hover { background:rgba(255,255,255,0.08); opacity:1; }
-.wm-xy-folder-toolbar { display:flex; gap:8px; padding:10px 16px; }
-.wm-xy-folder-tree { padding:4px 16px; overflow-y:auto; max-height:60vh; }
-.wm-xy-folder-row { display:flex; align-items:center; gap:6px; padding:4px 6px; border-radius:6px;
-  transition:background .12s ease; }
-.wm-xy-folder-row:hover { background:rgba(83,74,183,0.06); }
-.wm-xy-folder-tri { cursor:pointer; color:var(--wm-lo-fg, #e6e6e6); opacity:0.55; width:10px; flex:none;
-  transition:opacity .12s ease; }
-.wm-xy-folder-tri:hover { opacity:1; }
-.wm-xy-folder-cb { accent-color:var(--wm-lo-accent, #9b8af5); cursor:pointer; flex:none; }
-.wm-xy-folder-label { font-size:12px; cursor:default; }
-.wm-xy-folder-cnt { font-size:11px; color:var(--wm-lo-fg, #e6e6e6); opacity:0.55; }
-.wm-xy-folder-footer { display:flex; gap:8px; padding:12px 16px; border-top:1px solid var(--border-color, #444);
-  justify-content:flex-end; }
-
-/* ---- 通用按钮（弹窗内） ---- */
-.wm-xy-btn { flex:1; padding:6px 0; font-size:12px; cursor:pointer;
-  background:var(--wm-lo-field, #1e1e1e); color:var(--wm-lo-fg, #e6e6e6);
-  border:1px solid var(--border-color, #444); border-radius:6px;
-  transition:border-color .15s ease, background .15s ease; font-family:sans-serif; }
-.wm-xy-btn:hover { border-color:var(--wm-lo-accent, #9b8af5); background:rgba(83,74,183,0.08); }
-.wm-xy-btn-primary { flex:0 0 auto; padding:6px 18px; background:var(--wm-lo-accent, #9b8af5); color:#fff;
-  border:1px solid var(--wm-lo-accent, #9b8af5); }
-.wm-xy-btn-primary:hover { background:#6358c4; border-color:#6358c4; }
-
-/* ---- 行拖动排序（⠿ 手柄） ---- */
-.wm-xy-grip { flex:none; cursor:grab; color:var(--wm-lo-fg, #e6e6e6); opacity:.45; user-select:none;
-  display:inline-flex; align-items:center; align-self:center; padding:0 2px;
-  transition:opacity .15s ease; }
-.wm-xy-grip:hover { opacity:.95; }
-.wm-xy-grip:active { cursor:grabbing; }
-.wm-xy-row.dragging { opacity:.35; }
-.wm-xy-row.drop-target { box-shadow:0 0 0 2px var(--wm-lo-accent, #9b8af5) inset;
-  background:rgba(83,74,183,0.12); border-radius:8px; }
-/* ---- 模型预览浮窗 ---- */
-.wm-xy-preview { position:fixed; z-index:100002; max-width:308px; padding:6px;
-  background:var(--wm-lo-panel, #2a2a2a); border:1px solid var(--border-color,#555);
-  border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,.45); pointer-events:none; }
-.wm-xy-preview img { display:block; max-width:296px; max-height:56vh; border-radius:5px; object-fit:contain; }
-`;
-    document.head.append(s);
+function showPv(name, anchor) {
+    if (!name || !anchor?.getBoundingClientRect) return;
+    const token = ++_pvToken;
+    const box = document.createElement("img");
+    box.onload = () => {
+        if (token !== _pvToken) return;
+        const img = getPv().querySelector(".img");
+        img.innerHTML = "";
+        img.append(box);
+        positionPv(anchor);
+        _pv.classList.add("open");
+    };
+    box.onerror = () => { if (token === _pvToken) hidePv(); };
+    box.src = previewUrl(name);
 }
-
-// 让节点根据 DOM 真实高度重新计算外框尺寸（同 LoRA 节点方案）。
-let _wmResizePending = new WeakSet();
-function scheduleResize(node) {
-    if (!node || _wmResizePending.has(node)) return;
-    _wmResizePending.add(node);
-    requestAnimationFrame(() => {
-        _wmResizePending.delete(node);
-        resizeNode(node);
+function hidePv() {
+    clearTimeout(_pvTimer);
+    _pvToken += 1;
+    if (_pv) _pv.classList.remove("open");
+}
+// 悬停延时：行 400ms，弹窗条目 300ms（和 LoRA 卡片一致）
+function hoverPv(name, anchor, delay) {
+    anchor.addEventListener("mouseenter", () => {
+        if (!name) return;
+        clearTimeout(_pvTimer);
+        _pvTimer = setTimeout(() => showPv(name, anchor), delay);
     });
-}
-function resizeNode(node) {
-    if (!node || typeof node.setSize !== "function" || typeof node.computeSize !== "function") return;
-    const sz = node.computeSize();
-    if (!Array.isArray(sz) || sz.length < 2 || !Number.isFinite(sz[1])) return;
-    const [w, h] = sz;
-    if (Math.abs((node.size?.[1] || 0) - h) < 0.5) return;
-    node.setSize([Math.max(node.size?.[0] || w, w), h]);
-    node.setDirtyCanvas?.(true, true);
-}
-function attachResizeObserver(node, el) {
-    if (!el || node.__wmRO) return;
-    const ro = new ResizeObserver(() => scheduleResize(node));
-    ro.observe(el);
-    node.__wmRO = ro;
+    anchor.addEventListener("mouseleave", hidePv);
 }
 
 //==============================================================================
-// 行拖动排序（⠿ 手柄，交互同预设管理器：目标行紫色高亮，上/下半区定插入前后）
+// 添加 / 替换
 //==============================================================================
-const GRIP_SVG = `<svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><circle cx="2.5" cy="3" r="1.6"/><circle cx="7.5" cy="3" r="1.6"/><circle cx="2.5" cy="8" r="1.6"/><circle cx="7.5" cy="8" r="1.6"/><circle cx="2.5" cy="13" r="1.6"/><circle cx="7.5" cy="13" r="1.6"/></svg>`;
+function addEntry(node, path) {
+    if (rowFull(node)) { warn(node, `已达上限 ${MAX_ROWS} 条`); return null; }
+    if (usedPaths(node).has(norm(path))) { warn(node, `列表里已经有「${nameOf(path)}」了`); return null; }
+    const entry = { on: true, name: path };
+    node.__xyStack.push(entry);
+    node.__xySel = norm(path);
+    syncData(node);
+    renderRows(node, true);
+    return entry;
+}
 
-// grip 手柄可拖发起排序；拖拽数据带 node.id，drop 时校验，防跨节点串位
-function makeRowGrip(node, stack, i, row) {
-    const grip = document.createElement("div");
-    grip.className = "wm-xy-grip";
-    grip.title = "拖动调整顺序";
-    grip.innerHTML = GRIP_SVG;
+function replaceEntry(node, entry, path) {
+    if (!path) return false;
+    if (norm(path) === norm(entry.name)) return true;
+    if (usedPaths(node).has(norm(path))) { warn(node, `列表里已经有「${nameOf(path)}」了`); return false; }
+    const wasSel = node.__xySel === norm(entry.name);
+    entry.name = path;
+    if (wasSel) node.__xySel = norm(path);
+    syncData(node);
+    renderRows(node, true);
+    warn(node, `已换成 ${nameOf(path)}`);
+    return true;
+}
+
+//==============================================================================
+// 渲染
+//==============================================================================
+function makeRow(node, entry) {
+    const missing = isMissing(node, entry.name);
+    const sel = node.__xySel === norm(entry.name);
+    // 描边画在 wrap 上，行只负责排内容
+    const wrap = document.createElement("div");
+    wrap.className = "wm2-wrap" + (entry.on ? "" : " off") + (missing ? " miss" : "") + (sel ? " sel" : "");
+    wrap.dataset.name = entry.name;
+
+    const row = document.createElement("div");
+    row.className = "wm2-row" + (entry.on ? "" : " off") + (missing ? " miss" : "") + (sel ? " sel" : "");
+    wrap.append(row);
+
+    const grip = document.createElement("span");
+    grip.className = "wm2-grip";
+    grip.innerHTML = IC.grip;
+    grip.title = "拖动排序";
     grip.draggable = true;
     grip.addEventListener("dragstart", (e) => {
-        e.dataTransfer.setData("text/plain", `wm-reorder:${node.id}:${i}`);
+        e.stopPropagation();
+        node.__xyDrag = norm(entry.name);
+        node.__xySel = norm(entry.name);
+        row.classList.add("drag");
+        try { e.dataTransfer.setData("text/plain", `wmxy:${node.id}:row`); } catch (err) {}
         e.dataTransfer.effectAllowed = "move";
-        row.classList.add("dragging");
+        try { e.dataTransfer.setDragImage(row, 16, 12); } catch (err) {}
     });
-    grip.addEventListener("dragend", () => row.classList.remove("dragging"));
+    grip.addEventListener("dragend", () => { node.__xyDrag = null; clearMarks(node); renderRows(node, true); });
+    row.append(grip);
+
+    row.append(makeToggle(entry.on, () => {
+        entry.on = !entry.on;
+        syncData(node);
+        renderRows(node, true);
+    }));
+
+    const name = document.createElement("span");
+    name.className = "wm2-name" + (missing ? " miss" : "");
+    const stemSpan = document.createElement("span");
+    stemSpan.textContent = nameOf(entry.name);
+    name.append(stemSpan);
+    const ext = extOf(entry.name || "");
+    if (ext) { const s = document.createElement("span"); s.className = "ext"; s.textContent = ext; name.append(s); }
+    name.title = (entry.name || "未选择模型") + "\n点击重新选择其他模型";
+    name.onclick = (e) => {
+        e.stopPropagation();
+        node.__xySel = norm(entry.name);
+        openModal(node, { replace: entry });
+    };
+    hoverPv(entry.name, name, 400);
+    row.append(name);
+
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "wm2-ico del";
+    del.textContent = "✕";
+    del.title = "删除";
+    del.onclick = (e) => {
+        e.stopPropagation();
+        removeRow(node, entry.name);
+        if (node.__xySel === norm(entry.name)) node.__xySel = null;
+        syncData(node);
+        renderRows(node, true);
+    };
+    row.append(del);
 
     row.addEventListener("dragover", (e) => {
-        const types = Array.from((e.dataTransfer && e.dataTransfer.types) || []);
-        if (types.includes("Files") || !types.includes("text/plain")) return; // 只接受本插件行拖放
-        e.preventDefault();
-        row.classList.add("drop-target");
+        if (!node.__xyDrag || node.__xyDrag === norm(entry.name)) return;
+        e.preventDefault(); e.stopPropagation();
+        e.dataTransfer.dropEffect = "move";
+        clearMarks(node);
+        const r = row.getBoundingClientRect();
+        row.classList.add(e.clientY > r.top + r.height / 2 ? "over-bot" : "over-top");
     });
-    row.addEventListener("dragleave", () => row.classList.remove("drop-target"));
     row.addEventListener("drop", (e) => {
-        row.classList.remove("drop-target");
-        const raw = e.dataTransfer.getData("text/plain");
-        if (!raw || !raw.startsWith("wm-reorder:")) return;
-        const parts = raw.split(":");
-        if (String(node.id) !== parts[1]) return;
-        const si = parseInt(parts[2], 10);
-        if (!Number.isInteger(si) || si === i || si < 0 || si >= stack.length) return;
-        e.preventDefault();
-        e.stopPropagation();
-        const rect = row.getBoundingClientRect();
-        const after = (e.clientY - rect.top) > rect.height / 2; // 上下半区定插入前/后
-        const [moved] = stack.splice(si, 1);
-        let at = i;
-        if (si < i) at -= 1; // 移除后目标索引左移
-        if (after) at += 1;
-        stack.splice(at, 0, moved);
+        const from = node.__xyDrag;
+        if (!from || from === norm(entry.name)) return;
+        e.preventDefault(); e.stopPropagation();
+        const r = row.getBoundingClientRect();
+        moveRow(node, from, entry, e.clientY > r.top + r.height / 2);
+        clearMarks(node);
         syncData(node);
-        renderRows(node);
+        renderRows(node, true);
     });
-    return grip;
+
+    return wrap;
 }
 
-function renderRows(node) {
-    if (!node.__wmBuilt || !node.__rowsEl) return;
+function makeToggle(on, onclick, title) {
+    const t = document.createElement("span");
+    t.className = "wm2-tgl" + (on ? " on" : "");
+    t.title = title || (on ? "已启用" : "已停用");
+    t.onclick = (e) => { e.stopPropagation(); onclick(); };
+    return t;
+}
+
+function clearMarks(node) {
+    (node.__wm2Container?.querySelectorAll(".over-top,.over-bot,.drag") || []).forEach((x) => {
+        x.classList.remove("over-top", "over-bot", "drag");
+    });
+}
+
+function renderRows(node, keepScroll) {
+    const list = node.__xyList;
+    if (!list) return;
+    const top = list.scrollTop;
+    list.innerHTML = "";
+
+    const head = document.createElement("div");
+    head.className = "wm2-lhead";
+    head.style.cursor = "default";           // 模型没有强度，表头不参与横向等比调
+    const all = allRows(node), act = activeRows(node);
+    const allOn = all.length > 0 && act.length === all.length;
+    const tallob = document.createElement("span");
+    tallob.className = "tallob";
+    tallob.append(makeToggle(allOn, () => {
+        const turnOn = !allOn;
+        all.forEach((r) => { r.on = turnOn; });
+        syncData(node);
+        renderRows(node, true);
+    }, allOn ? "全部停用" : "全部启用"));
+    const t = document.createElement("span");
+    t.textContent = "Toggle All";
+    tallob.append(t);
+    tallob.onclick = (e) => e.stopPropagation();
+    head.append(tallob);
+
+    const cnt = document.createElement("span");
+    cnt.className = "act";
+    cnt.textContent = `${act.length}/${all.length}`;
+    head.append(cnt);
+
+    const missCount = all.filter((r) => isMissing(node, r.name)).length;
+    if (missCount > 0) {
+        const m = document.createElement("span");
+        m.className = "miss";
+        m.textContent = `⚠ ${missCount} 缺失`;
+        head.append(m);
+    }
+
+    const sl = document.createElement("span");
+    sl.className = "slabel";
+    sl.innerHTML = `模型<span class="hint">点名称重选 · 拖手柄排序</span>`;
+    head.append(sl);
+    list.append(head);
+
+    if (!all.length) {
+        const e = document.createElement("div");
+        e.className = "wm2-empty";
+        e.innerHTML = `还没有模型<br>上方<b>搜索框</b>输入关键词回车，或点下方<b>Add 模型</b> 浏览全部`;
+        list.append(e);
+    }
+    all.forEach((entry) => list.append(makeRow(node, entry)));
+
+    if (keepScroll) list.scrollTop = top;
+}
+
+//==============================================================================
+// 浏览弹窗（多选添加 / 单选替换 + 文件夹侧栏），结构与 LoRA 的弹窗共用同一批样式
+//==============================================================================
+let _bd = null, _bdState = null;
+function closeModal() {
+    if (_bd) _bd.classList.remove("open");
+    _bdState = null;
+    hidePv();
+}
+function openModal(node, opts = {}) {
     injectStyle();
-    const stack = node.__unetStack || [];
-    node.__rowsEl.innerHTML = "";
+    const repl = opts.replace || null;
+    _bd = _bd && _bd.isConnected ? _bd : (() => {
+        const b = document.createElement("div");
+        b.className = "wm2-bd";
+        document.body.append(b);
+        return b;
+    })();
+    _bdState = { node, kw: "", dir: null, sel: new Set(), replace: repl };
+    const bd = _bd;
+    bd.innerHTML = "";
+    bd.classList.add("open");
 
-    if (!stack.length) {
-        const hint = document.createElement("div");
-        hint.className = "wm-xy-hint";
-        hint.textContent = "暂无模型，点击下方「+ Add 模型」添加";
-        node.__rowsEl.append(hint);
-    }
+    const m = document.createElement("div");
+    m.className = "wm2-modal";
+    bd.append(m);
 
-    stack.forEach((entry, i) => {
-        const row = document.createElement("div");
-        row.className = "wm-xy-row";
+    const h = document.createElement("h4");
+    h.textContent = repl ? `重新选择模型 · ${nameOf(repl.name)}` : "Add 模型";
+    const x = document.createElement("span");
+    x.className = "x";
+    x.textContent = "✕";
+    x.onclick = () => closeModal();
+    h.append(x);
+    m.append(h);
 
-        const on = document.createElement("input");
-        on.type = "checkbox";
-        on.className = "wm-xy-on";
-        on.checked = !!entry.on;
-        on.onchange = () => { entry.on = on.checked; syncData(node); };
+    const searchWrap = document.createElement("div");
+    searchWrap.className = "wm2-msearch";
+    searchWrap.innerHTML = IC.mag;
+    const kw = document.createElement("input");
+    kw.type = "text";
+    kw.placeholder = "搜索模型名称 / 文件夹…";
+    kw.onkeydown = (e) => e.stopPropagation();
+    kw.oninput = () => { _bdState.kw = kw.value; renderSide(); renderList(); };
+    searchWrap.append(kw);
+    m.append(searchWrap);
+    setTimeout(() => kw.focus(), 0);
 
-        const name = document.createElement("div");
-        name.className = "wm-xy-name";
-        name.textContent = entry.name ? basename(entry.name) : "（点击选择模型）";
-        name.title = entry.name || "点击选择模型";
-        name.onclick = () => {
-            showChooser(node, (path) => {
-                entry.name = path;
-                syncData(node);
-                name.textContent = basename(path);
-                name.title = path;
-            });
-        };
+    const body = document.createElement("div");
+    body.className = "wm2-mbody";
+    m.append(body);
+    const side = document.createElement("div");
+    side.className = "wm2-mside";
+    const list = document.createElement("div");
+    list.className = "wm2-mlist";
+    body.append(side, list);
 
-        // 鼠标悬停模型名 → 显示预览浮窗
-        if (entry.name) {
-            name.addEventListener("mouseenter", (e) => showPreviewPop(entry.name, e));
-            name.addEventListener("mousemove", movePreviewPop);
-            name.addEventListener("mouseleave", hidePreviewPop);
+    const foot = document.createElement("div");
+    foot.className = "wm2-mfoot";
+    const cnt = document.createElement("span");
+    cnt.className = "cnt";
+    const sp = document.createElement("span");
+    sp.className = "sp";
+    const cancel = document.createElement("button");
+    cancel.textContent = "取消";
+    cancel.onclick = () => closeModal();
+    const ok = document.createElement("button");
+    ok.className = "ok";
+    ok.textContent = repl ? "替换" : "添加";
+    ok.onclick = () => {
+        const picks = [...(_bdState?.sel || [])];
+        closeModal();
+        if (repl) replaceEntry(node, repl, picks[0]);
+        else {
+            let added = 0;
+            picks.forEach((p) => { if (addEntry(node, p)) added += 1; });
+            if (added) warn(node, `已添加 ${added} 个模型`);
         }
+    };
+    foot.append(cnt, sp, cancel, ok);
+    m.append(foot);
 
-        const del = document.createElement("div");
-        del.className = "wm-xy-del";
-        del.textContent = "✕";
-        del.title = "删除";
-        del.onclick = () => {
-            node.__unetStack.splice(i, 1);
-            syncData(node);
-            renderRows(node);
+    const filtered = () => {
+        const kw2 = _bdState.kw.trim().toLowerCase();
+        return (node.__xyAll || []).filter((p) => {
+            if (_bdState.dir !== null && (dirOf(p) || "根目录") !== _bdState.dir) return false;
+            if (kw2 && !norm(p).toLowerCase().includes(kw2) && !nameOf(p).toLowerCase().includes(kw2)) return false;
+            return true;
+        }).filter((p) => repl || !usedPaths(node).has(norm(p)));   // 顶层已添加过的不再出现
+    };
+    function renderSide() {
+        side.innerHTML = "";
+        const mk = (label, dir, n) => {
+            const it = document.createElement("div");
+            it.className = "f" + (_bdState.dir === dir ? " on" : "");
+            it.innerHTML = IC.folder;
+            const s = document.createElement("span");
+            s.textContent = label;
+            const c = document.createElement("span");
+            c.className = "n";
+            c.textContent = n;
+            it.append(s, c);
+            it.onclick = () => { _bdState.dir = dir; renderSide(); renderList(); };
+            side.append(it);
         };
-
-        row.append(makeRowGrip(node, stack, i, row), on, name, del);
-        node.__rowsEl.append(row);
-    });
-
-    if (node.__rowsDomWidget && node.__rowsDomWidget.computeSize) {
-        scheduleResize(node);
+        const all = node.__xyAll || [];
+        mk("全部", null, all.length);
+        const m2 = new Map();
+        const kw2 = _bdState.kw.trim().toLowerCase();
+        all.filter((p) => !kw2 || norm(p).toLowerCase().includes(kw2))
+            .forEach((p) => { const d = dirOf(p) || "根目录"; m2.set(d, (m2.get(d) || 0) + 1); });
+        [...m2.entries()].sort((a, b) => a[0].localeCompare(b[0])).forEach(([d, n]) => mk(d, d, n));
     }
-}
+    // 选中态只改 class，不重建列表（多选时每点一次都重排一次会闪）
+    function refreshSelUI() {
+        list.querySelectorAll(".wm2-mit").forEach((it) => {
+            const on = _bdState.sel.has(it.dataset.p);
+            it.classList.toggle("on", on);
+            const tg = it.querySelector(".wm2-tgl");
+            if (tg) tg.className = on ? "wm2-tgl on" : "wm2-tgl";
+        });
+        cnt.textContent = repl
+            ? (_bdState.sel.size ? `换成：${nameOf([..._bdState.sel][0])}` : "单选一个模型")
+            : `已选 ${_bdState.sel.size} 个 · 可多选`;
+        ok.disabled = _bdState.sel.size === 0;
+    }
+    function renderList() {
+        list.innerHTML = "";
+        const its = filtered();
+        if (!its.length) {
+            const e = document.createElement("div");
+            e.className = "wm2-empty";
+            e.textContent = repl ? "没有可选的模型" : "没有匹配的模型（已添加过的不再出现）";
+            list.append(e);
+        }
+        its.slice(0, 200).forEach((p) => {
+            const it = document.createElement("div");
+            const on = _bdState.sel.has(p);
+            it.className = "wm2-mit" + (on ? " on" : "");
+            it.dataset.p = p;
+            const th = document.createElement("span");
+            th.className = "th";
+            th.textContent = nameOf(p).slice(0, 2).toUpperCase();
+            const im = document.createElement("img");
+            im.loading = "lazy";
+            im.onerror = () => im.remove();
+            im.src = previewUrl(p);
+            th.append(im);
+            const nm = document.createElement("span");
+            nm.className = "nm";
+            const tt = document.createElement("span");
+            tt.className = "t";
+            tt.textContent = nameOf(p);
+            tt.title = p;
+            nm.append(tt);
+            // 勾选方框只是选中态的显示，点击交给整条 item 处理
+            const tg = document.createElement("span");
+            tg.className = on ? "wm2-tgl on" : "wm2-tgl";
+            it.append(th, nm);
+            if (repl && norm(p) === norm(repl.name)) {
+                const lab = document.createElement("span");
+                lab.className = "tagu";
+                lab.textContent = "当前";
+                it.append(lab);
+            }
+            it.append(tg);
+            it.onclick = () => {
+                if (repl) { _bdState.sel.clear(); _bdState.sel.add(p); }
+                else if (_bdState.sel.has(p)) _bdState.sel.delete(p);
+                else _bdState.sel.add(p);
+                refreshSelUI();
+            };
+            hoverPv(p, nm, 300);
+            list.append(it);
+        });
+        refreshSelUI();
+    }
+    renderSide();
+    renderList();
 
-function updateFolderBtn(btn, node) {
-    if (!btn) return;
-    const f = node.__folderFilter;
-    const n = Array.isArray(f) ? f.length : 0;
-    btn.innerHTML =
-        `<span class="wm-xy-fb-ic">📁</span><span class="wm-xy-fb-txt">文件夹筛选</span>` +
-        (n ? `<span class="wm-xy-fb-badge">${n}</span>` : `<span class="wm-xy-fb-badge off">全部</span>`) +
-        `<span class="wm-xy-fb-chev">▾</span>`;
+    bd.onclick = (e) => { if (e.target === bd) closeModal(); };
 }
 
 //==============================================================================
-// 核心 UI 构建
+// 主体 UI
 //==============================================================================
-function buildCoreUI(node) {
-    if (node.__wmBuilt) return;
-    node.__wmBuilt = true;
+function buildUI(node) {
+    if (node.__xyBuilt) return;
+    node.__xyBuilt = true;
+    injectStyle();
 
-    const dataW = getDataWidget(node);
-    hideWidget(node, dataW);
+    hideWidget(node, getDataWidget(node));
     loadStack(node);
 
-    const container = document.createElement("div");
-    container.className = "wm-xy-container";
+    const c = document.createElement("div");
+    c.className = "wm2-container";
+    node.__wm2Container = c;
+    c.addEventListener("pointerdown", (e) => e.stopPropagation());
+    c.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
+    c.addEventListener("keydown", (e) => e.stopPropagation());
+    c.addEventListener("focusin", (e) => { if (e.target.tagName === "INPUT") e.stopPropagation(); });
 
-    // 1) 文件夹筛选按钮（DOM，置于最上）
-    const folderBtn = document.createElement("button");
-    folderBtn.className = "wm-xy-folderbtn";
-    folderBtn.type = "button";
-    folderBtn.onclick = () => {
-        openFolderModal(node, node.__folderFilter || [], (sel) => {
-            node.__folderFilter = sel;
-            syncData(node);
-            updateFolderBtn(folderBtn, node);
-        });
-    };
-    container.append(folderBtn);
-    node.__wmFolderBtn = folderBtn;
+    // 1) 搜索即添加
+    const search = document.createElement("div");
+    search.className = "wm2-search";
+    const mag = document.createElement("span");
+    mag.className = "mag";
+    mag.innerHTML = IC.mag;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "搜索模型名称 / 文件夹… 回车添加";
+    input.spellcheck = false;
+    const clr = document.createElement("button");
+    clr.type = "button";
+    clr.className = "clr";
+    clr.textContent = "✕";
+    clr.title = "清空";
+    const kbd = document.createElement("span");
+    kbd.className = "kbd";
+    kbd.textContent = "Enter";
+    search.append(mag, input, clr, kbd);
+    c.append(search);
+    node.__wm2Search = search;
+    node.__wm2SearchInput = input;
 
-    // 2) 行容器
-    const rowsEl = document.createElement("div");
-    rowsEl.className = "wm-xy-rows";
-    container.append(rowsEl);
-    node.__rowsEl = rowsEl;
+    const openAc = () => { _acIdx = 0; renderAc(node); };
+    input.addEventListener("focus", () => {
+        search.classList.add("focus");
+        if (node.__xyAll?.length) openAc();
+        else refreshKnown(node).then(openAc);
+    });
+    // 输入框已聚焦时再点一次不再触发 focus —— 要靠 click 主动重开
+    input.addEventListener("click", () => {
+        if (_ac?.classList.contains("open") && _acNode === node) return;
+        openAc();
+    });
+    search.addEventListener("click", (e) => {
+        if (e.target === search || e.target.tagName !== "INPUT") openAc();
+    });
+    input.addEventListener("input", () => {
+        node.__xyKw = input.value;
+        search.classList.toggle("has-q", !!input.value);
+        _acIdx = 0;
+        renderAc(node);
+    });
+    input.addEventListener("blur", () => { search.classList.remove("focus"); });
+    input.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "ArrowDown") { e.preventDefault(); acMove(1); }
+        else if (e.key === "ArrowUp") { e.preventDefault(); acMove(-1); }
+        else if (e.key === "Enter") {
+            e.preventDefault();
+            const p = _acItems[_acIdx];
+            if (p) pickAc(node, p);
+            else if (node.__xyKw.trim()) warn(node, `没找到「${node.__xyKw.trim()}」，换个关键词或用 Add 模型 浏览`);
+        } else if (e.key === "Escape") { closeAc(); input.blur(); }
+    });
+    clr.onclick = (e) => { e.stopPropagation(); node.__xyKw = ""; input.value = ""; search.classList.remove("has-q"); input.focus(); };
+    clr.onmousedown = (e) => e.preventDefault();
 
-    // 3) Add 模型按钮
-    const addBtn = document.createElement("button");
-    addBtn.className = "wm-xy-add";
-    addBtn.type = "button";
-    addBtn.textContent = "+ Add 模型";
-    addBtn.onclick = () => {
-        const entry = { on: true, name: "" };
-        node.__unetStack.push(entry);
-        syncData(node);
-        renderRows(node);
-        showChooser(node, (path) => {
-            entry.name = path;
-            syncData(node);
-            renderRows(node);
-        }, () => {
-            const idx = node.__unetStack.indexOf(entry);
-            if (idx >= 0) {
-                node.__unetStack.splice(idx, 1);
-                syncData(node);
-                renderRows(node);
-            }
-        });
-    };
-    container.append(addBtn);
-
-    const domWidget = node.addDOMWidget("wm_unet_rows", "div", container, { serialize: false });
-    domWidget.serializeValue = () => undefined;
-    domWidget.computeSize = function (width) {
-        const el = node.__rowsDomWidget?.element || container;
-        let h = el ? (el.scrollHeight || el.offsetHeight || 0) : 0;
-        if (!h) {
-            const n = (node.__unetStack || []).length;
-            h = n === 0 ? 50 : n * ROW_H + 70;
+    // 2) 列表（固定高度 + 内滚动）
+    const list = document.createElement("div");
+    list.className = "wm2-list";
+    list.tabIndex = 0;
+    c.append(list);
+    node.__xyList = list;
+    list.addEventListener("drop", (e) => {
+        if (!node.__xyDrag || e.target.closest(".wm2-row")) return;
+        e.preventDefault(); e.stopPropagation();
+        const from = node.__xyDrag;
+        node.__xyDrag = null;
+        const rows = allRows(node);
+        const src = findRow(node, from);
+        if (src) {
+            removeRow(node, from);
+            rows.push(src);
         }
-        return [width, h + 8];
-    };
-    node.__rowsDomWidget = domWidget;
+        clearMarks(node);
+        syncData(node);
+        renderRows(node, true);
+    });
+    // 键盘：↑↓ 选行 / Ctrl+↑↓ 移动 / Space 开关 / Del 删除
+    list.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.target.tagName === "INPUT") return;
+        const rows = allRows(node);
+        if (!rows.length) return;
+        const idx = rows.findIndex((r) => norm(r.name) === node.__xySel);
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            const d = e.key === "ArrowUp" ? -1 : 1;
+            if (e.ctrlKey && node.__xySel) shiftRow(node, node.__xySel, d);
+            else { const n = rows[Math.max(0, Math.min(rows.length - 1, (idx < 0 ? 0 : idx) + d))]; if (n) node.__xySel = norm(n.name); }
+            syncData(node);
+            renderRows(node, true);
+        } else if (e.key === " " && node.__xySel) {
+            e.preventDefault();
+            const r = findRow(node, node.__xySel);
+            if (r) { r.on = !r.on; syncData(node); renderRows(node, true); }
+        } else if (e.key === "Delete" && node.__xySel) {
+            e.preventDefault();
+            removeRow(node, node.__xySel);
+            node.__xySel = null;
+            syncData(node);
+            renderRows(node, true);
+        }
+    });
 
-    updateFolderBtn(folderBtn, node);
-    renderRows(node);
-    attachResizeObserver(node, container);
+    // 3) 提示条
+    const w = document.createElement("div");
+    w.className = "wm2-warn";
+    c.append(w);
+    node.__wm2Warn = w;
+
+    // 4) 底部按钮（模型不分组，所以只有 Add 模型，占满整行）
+    const addrow = document.createElement("div");
+    addrow.className = "wm2-addrow";
+    const addBtn = document.createElement("button");
+    addBtn.type = "button";
+    addBtn.className = "wm2-addbtn";
+    addBtn.textContent = "＋ Add 模型";
+    addBtn.onclick = () => openModal(node, {});
+    addrow.append(addBtn);
+    c.append(addrow);
+
+    const domWidget = node.addDOMWidget("wm_xy_unet_ui", "div", c, { serialize: false });
+    // 上报常量高度（节点高度不随条目数变化），并记下可用宽度用于反解内边距
+    domWidget.computeSize = (width) => {
+        node.__wm2WidgetW = width;
+        return [width, UI_H];
+    };
+    node.__wm2DomWidget = domWidget;
+
+    ensureNodeFits(node);
+    refreshKnown(node);
 }
 
-//==============================================================================
-// 扩展注册
-//==============================================================================
+// 已知文件集合：用于「缺失即红」和候选列表
+function refreshKnown(node) {
+    return getModelFiles().then((all) => {
+        node.__xyAll = all;
+        node.__xyKnown = new Set(all.map(norm));
+        if (node.__xyBuilt) renderRows(node, true);
+    });
+}
+
 function patchNodeType(nodeType) {
-    const origONC = nodeType.prototype.onNodeCreated;
+    const origCreate = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
-        origONC?.apply(this, arguments);
-        try { buildCoreUI(this); }
-        catch (e) { console.warn("[WindMix] unet manager onNodeCreated failed", e); }
+        origCreate?.apply(this, arguments);
+        try { buildUI(this); } catch (e) { console.warn("[WindMix] unet ui onNodeCreated failed", e); }
     };
-    const origOConf = nodeType.prototype.onConfigure;
+    const origConf = nodeType.prototype.onConfigure;
     nodeType.prototype.onConfigure = function (info) {
-        origOConf?.apply(this, arguments);
+        origConf?.apply(this, arguments);
         try {
-            if (!this.__wmBuilt) buildCoreUI(this);
+            if (!this.__xyBuilt) buildUI(this);
             loadStack(this);
-            renderRows(this);
-            if (this.__wmFolderBtn) updateFolderBtn(this.__wmFolderBtn, this);
-            scheduleResize(this);
-        } catch (e) { console.warn("[WindMix] unet manager onConfigure failed", e); }
+            renderRows(this, true);
+            ensureNodeFits(this);   // workflow 里存的尺寸可能比界面需要的矮
+        } catch (e) { console.warn("[WindMix] unet ui onConfigure failed", e); }
+    };
+    const origResize = nodeType.prototype.onResize;
+    nodeType.prototype.onResize = function (size) {
+        origResize?.apply(this, arguments);
+        try { if (this.__xyBuilt) lockBottomBar(this); } catch (e) {}
     };
 }
+
+document.addEventListener("pointerdown", (e) => {
+    if (!_ac?.classList.contains("open")) return;
+    // 只认「自己那个节点的搜索框」：类名和 LoRA 节点共用，按类判断会互相判定为内部点击
+    const inside = e.target.closest(".wm2-ac") ||
+        (_acNode?.__wm2Search && e.target.closest(".wm2-search") === _acNode.__wm2Search);
+    if (!inside) closeAc();
+}, true);
+// 弹窗没有可聚焦的遮罩，Escape 只能在 document 上兜底
+document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && _bd?.classList.contains("open")) { e.stopPropagation(); closeModal(); }
+}, true);
+window.addEventListener("scroll", () => {
+    if (_ac?.classList.contains("open")) positionAc();
+    hidePv();
+}, true);
+window.addEventListener("resize", () => { if (_ac?.classList.contains("open")) positionAc(); hidePv(); });
 
 app.registerExtension({
     name: "windmix.xy.unet.manager",
     beforeRegisterNodeDef(nodeType, nodeData) {
         if (NODE_TYPES.includes(nodeData?.name)) patchNodeType(nodeType);
+    },
+    setup() {
+        injectStyle();
     },
 });
