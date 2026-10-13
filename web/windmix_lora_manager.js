@@ -500,8 +500,14 @@ html.dark-theme .wm2-modal, html.dark-theme .wm2-pv {
 .wm2-mside .f { padding:5px 9px; border-radius:7px; font-size:12px; color:var(--wm-lo-fg); cursor:pointer;
   display:flex; align-items:center; gap:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .wm2-mside .f .n { margin-left:auto; font-size:10.5px; color:var(--wm-lo-dim); flex:none; }
+/* 长目录名：图标/箭头/计数锁死不缩，名称（.lbl）自己截断省略 */
+.wm2-mside .f svg { flex:none; }
+.wm2-mside .f .lbl { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; }
 .wm2-mside .f:hover { background:var(--wm-lo-accent-soft); }
 .wm2-mside .f.on { background:var(--wm-lo-accent-soft); color:var(--wm-lo-accent); font-weight:600; }
+/* 层级树折叠箭头 */
+.wm2-mside .f .chev { flex:none; color:var(--wm-lo-dim); display:inline-flex; transition:transform .15s; }
+.wm2-mside .f.open .chev { transform:rotate(90deg); }
 .wm2-mlist { flex:1; min-width:0; display:flex; flex-direction:column; gap:3px; overflow:auto;
   border-left:1px solid var(--wm-lo-line); padding-left:10px; scrollbar-width:thin; }
 .wm2-mit { display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:7px; cursor:pointer;
@@ -516,6 +522,57 @@ html.dark-theme .wm2-modal, html.dark-theme .wm2-pv {
 .wm2-mit .nm .t { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; color:var(--wm-lo-fg); }
 .wm2-mit .tagu { flex:none; font-size:10px; color:var(--wm-lo-accent); background:var(--wm-lo-accent-soft);
   border-radius:999px; padding:1px 7px; font-weight:600; }
+
+/* ---- 视图切换 + 缩略图网格模式（设计稿：design/lorastack_grid_modal.html） ---- */
+.wm2-modal.wide { width:760px; }
+/* 网格模式：弹窗高度锁死 80vh，溢出全部交给网格内部滚动条，外层绝不滚动 */
+.wm2-modal.gridmode { height:80vh; overflow:hidden; }
+.wm2-vsw { margin-left:auto; flex:none; display:flex; gap:2px; background:var(--wm-lo-field);
+  border:1px solid var(--wm-lo-line); border-radius:7px; padding:2px; }
+.wm2-vsw button { width:26px; height:22px; border:none; background:none; border-radius:5px;
+  color:var(--wm-lo-dim); cursor:pointer; display:inline-flex; align-items:center;
+  justify-content:center; padding:0; }
+.wm2-vsw button.on { background:var(--wm-lo-panel); color:var(--wm-lo-accent);
+  box-shadow:0 1px 3px rgba(0,0,0,.14); }
+.wm2-mgrid { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; gap:8px;
+  border-left:1px solid var(--wm-lo-line); padding-left:10px; }
+.wm2-ginfo { flex:none; font-size:11.5px; color:var(--wm-lo-dim); }
+.wm2-ginfo b { color:var(--wm-lo-accent); font-weight:600; }
+/* 固定 4 列等宽 + 固定行高 230px：卡片尺寸恒定（不依赖 aspect-ratio，部分前端不生效），
+   高度 = 弹窗剩余空间，排不完的走内部滚动条 */
+.wm2-grid { flex:1; min-height:0; display:grid; grid-template-columns:repeat(4,1fr); grid-auto-rows:230px; gap:10px;
+  overflow:auto; padding:2px 4px 6px 2px; scrollbar-width:thin; align-content:start; }
+.wm2-grid::-webkit-scrollbar { width:6px; }
+.wm2-grid::-webkit-scrollbar-thumb { background:var(--wm-lo-line2); border-radius:3px; }
+.wm2-grid::-webkit-scrollbar-thumb:hover { background:var(--wm-lo-accent); }
+/* 卡片：上图下名（列方向 flex，图区吃掉行高剩余），右上角勾选圈（悬停浮现、选中实心紫） */
+.wm2-card { position:relative; border-radius:10px; overflow:hidden; cursor:pointer;
+  display:flex; flex-direction:column;
+  background:var(--wm-lo-panel2); border:1.5px solid var(--wm-lo-line);
+  transition:border-color .12s, box-shadow .12s; }
+.wm2-card:hover { border-color:var(--wm-lo-accent); box-shadow:0 3px 12px rgba(30,30,60,.16); }
+.wm2-card .im { flex:1; min-height:0; background:linear-gradient(135deg,#4a4380,#7a6cc0);
+  position:relative; overflow:hidden; display:flex; align-items:center; justify-content:center;
+  color:#dcd6ff; font-size:13px; font-weight:600; }
+.wm2-card .im img { width:100%; height:100%; object-fit:cover; display:block; }
+.wm2-card .cap { flex:none; padding:6px 8px 7px; border-top:1px solid var(--wm-lo-line); background:var(--wm-lo-panel); }
+.wm2-card .cap .t { display:block; font-size:11.5px; line-height:15px; color:var(--wm-lo-fg);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.wm2-card .cap .d { display:block; font-size:10px; line-height:14px; color:var(--wm-lo-dim);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:1px; }
+.wm2-card .chk { position:absolute; right:6px; top:6px; z-index:2; width:21px; height:21px;
+  border-radius:50%; border:1.5px solid rgba(255,255,255,.85); background:rgba(20,20,26,.35);
+  opacity:0; transition:opacity .12s, background .12s, border-color .12s;
+  display:inline-flex; align-items:center; justify-content:center; }
+.wm2-card:hover .chk { opacity:1; }
+.wm2-card .chk svg { width:12px; height:12px; color:#fff; opacity:0; transform:scale(.6);
+  transition:opacity .12s, transform .14s cubic-bezier(.34,1.56,.64,1); }
+.wm2-card.sel { border-color:var(--wm-lo-accent); box-shadow:0 0 0 2px var(--wm-lo-accent-soft); }
+.wm2-card.sel .chk { opacity:1; background:var(--wm-lo-brand); border-color:var(--wm-lo-brand); }
+.wm2-card.sel .chk svg { opacity:1; transform:scale(1); }
+/* 角标（当前 / 外面已有 / 组内已有…）：左上胶囊，压在图上 */
+.wm2-card .tagu { position:absolute; left:6px; top:6px; z-index:2; font-size:9.5px; color:#fff;
+  background:rgba(20,20,26,.55); border-radius:999px; padding:1.5px 7px; font-weight:600; }
 .wm2-mfoot .hint { font-size:11px; color:var(--wm-lo-dim); font-style:italic; }
 .wm2-mfoot { display:flex; align-items:center; gap:9px; }
 .wm2-mfoot .cnt { font-size:11.5px; color:var(--wm-lo-dim); }
@@ -1220,6 +1277,12 @@ export function warn(node, msg, isErr) {
 // 浏览弹窗（多选添加 / 单选替换 + 文件夹侧栏）
 //==============================================================================
 let _bd = null, _bdState = null;
+// 弹窗视图：grid=缩略图网格 / list=列表。localStorage 记住上次选择，全局共享。
+let _wm2View = (() => {
+    try { return localStorage.getItem("WindMix.loraModalView") === "list" ? "list" : "grid"; }
+    catch (e) { return "grid"; }
+})();
+const CHECK_SVG = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 L6.5 12 L13 4"/></svg>`;
 function closeModal() {
     if (_bd) _bd.classList.remove("open");
     _bdState = null;
@@ -1236,7 +1299,7 @@ function openModal(node, gi, opts = {}) {
         _bd = b;
         return b;
     })();
-    _bdState = { node, gi, kw: "", dir: null, sel: new Set(), replace: repl };
+    _bdState = { node, gi, kw: "", dir: null, sel: new Set(), replace: repl, collapsed: new Set() };
     bd.innerHTML = "";
     bd.classList.add("open");
 
@@ -1248,11 +1311,24 @@ function openModal(node, gi, opts = {}) {
     h.textContent = repl
         ? `重新选择 LoRA · ${stemOf(baseOf(repl.name || ""))}`
         : (gi >= 0 && node.__wm2Stack[gi] ? `添加到配方 · ${node.__wm2Stack[gi].folder}` : "Add LoRA");
+    // 视图切换：列表 ⇄ 缩略图网格（选择记在 localStorage，下次打开保持）
+    const vsw = document.createElement("span");
+    vsw.className = "wm2-vsw";
+    const bList = document.createElement("button");
+    bList.type = "button";
+    bList.title = "列表视图";
+    bList.innerHTML = `<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="2.5" width="14" height="2" rx="1"/><rect x="1" y="7" width="14" height="2" rx="1"/><rect x="1" y="11.5" width="14" height="2" rx="1"/></svg>`;
+    const bGrid = document.createElement("button");
+    bGrid.type = "button";
+    bGrid.title = "缩略图视图";
+    bGrid.innerHTML = `<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6.2" height="6.2" rx="1.4"/><rect x="8.8" y="1" width="6.2" height="6.2" rx="1.4"/><rect x="1" y="8.8" width="6.2" height="6.2" rx="1.4"/><rect x="8.8" y="8.8" width="6.2" height="6.2" rx="1.4"/></svg>`;
+    vsw.append(bList, bGrid);
     const x = document.createElement("span");
     x.className = "x";
     x.textContent = "✕";
+    x.style.marginLeft = "0";   // 右侧空间交给 vsw 的 margin-left:auto
     x.onclick = () => closeModal();
-    h.append(x);
+    h.append(vsw, x);
     m.append(h);
 
     const searchWrap = document.createElement("div");
@@ -1262,7 +1338,7 @@ function openModal(node, gi, opts = {}) {
     kw.type = "text";
     kw.placeholder = "搜索 LoRA 名称 / 文件夹…";
     kw.onkeydown = (e) => e.stopPropagation();
-    kw.oninput = () => { _bdState.kw = kw.value; renderList(); };
+    kw.oninput = () => { _bdState.kw = kw.value; renderSide(); renderBody(); };
     searchWrap.append(kw);
     m.append(searchWrap);
     setTimeout(() => kw.focus(), 0);
@@ -1274,7 +1350,15 @@ function openModal(node, gi, opts = {}) {
     side.className = "wm2-mside";
     const list = document.createElement("div");
     list.className = "wm2-mlist";
-    body.append(side, list);
+    // 缩略图网格视图（设计稿同款：信息行 + 卡片网格）
+    const gridWrap = document.createElement("div");
+    gridWrap.className = "wm2-mgrid";
+    const ginfo = document.createElement("div");
+    ginfo.className = "wm2-ginfo";
+    const grid = document.createElement("div");
+    grid.className = "wm2-grid";
+    gridWrap.append(ginfo, grid);
+    body.append(side, list, gridWrap);
 
     const foot = document.createElement("div");
     foot.className = "wm2-mfoot";
@@ -1303,18 +1387,34 @@ function openModal(node, gi, opts = {}) {
     foot.append(cnt, sp, cancel, ok);
     m.append(foot);
 
-    function dirsOf(listPaths) {
-        const m2 = new Map();
-        listPaths.forEach((p) => { const d = dirOf(p) || "根目录"; m2.set(d, (m2.get(d) || 0) + 1); });
-        return [...m2.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    function kwFiltered() {
+        const kw2 = _bdState.kw.trim().toLowerCase();
+        return (node.__wm2All || []).filter((p) => !kw2 ||
+            norm(p).toLowerCase().includes(kw2) || stemOf(baseOf(p)).toLowerCase().includes(kw2));
+    }
+    // 层级目录树：style / style/anime 这类路径拆成父子节点，count 含所有子孙文件
+    function treeOf(paths) {
+        const root = { kids: new Map() };
+        for (const p of paths) {
+            const d = dirOf(p);
+            if (!d) continue;   // 根目录散文件只出现在「全部」里，不单独建节点
+            let n = root;
+            for (const seg of d.split("/")) {
+                if (!n.kids.has(seg)) n.kids.set(seg, { name: seg, path: (n.path ? n.path + "/" : "") + seg, kids: new Map(), count: 0 });
+                n = n.kids.get(seg);
+                n.count += 1;
+            }
+        }
+        return root;
     }
     function items() {
         // 只按「顶层行」判重：配方里挂过的 LoRA 依然要出现在顶层 Add LoRA 列表里
         const used = usedTopPaths(node);
         const hideUsed = !repl && gi < 0;
         const kw2 = _bdState.kw.trim().toLowerCase();
+        const d = _bdState.dir;
         return (node.__wm2All || []).filter((p) => {
-            if (_bdState.dir !== null && (dirOf(p) || "根目录") !== _bdState.dir) return false;
+            if (d !== null) { const pd = dirOf(p); if (pd !== d && !pd.startsWith(d + "/")) return false; }
             if (kw2 && !norm(p).toLowerCase().includes(kw2) && !stemOf(baseOf(p)).toLowerCase().includes(kw2)) return false;
             return true;
         }).filter((p) => !hideUsed || !used.has(norm(p)));
@@ -1322,24 +1422,45 @@ function openModal(node, gi, opts = {}) {
     function renderSide() {
         side.innerHTML = "";
         const all = (node.__wm2All || []).length;
-        const mk = (label, dir, n) => {
+        const CHEV = `<svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 2.5 L8 6 L4 9.5"/></svg>`;
+        const row = (label, dir, n, depth, kids, key) => {
             const it = document.createElement("div");
             it.className = "f" + (_bdState.dir === dir ? " on" : "");
-            it.innerHTML = IC.folder;
+            it.style.paddingLeft = (9 + depth * 13) + "px";
+            if (kids) {
+                // 有子目录：箭头单独负责折叠/展开，点行其余部分仍是筛选
+                if (!_bdState.collapsed.has(key)) it.classList.add("open");
+                const ch = document.createElement("span");
+                ch.className = "chev";
+                ch.innerHTML = CHEV;
+                ch.onclick = (e) => {
+                    e.stopPropagation();
+                    if (_bdState.collapsed.has(key)) _bdState.collapsed.delete(key);
+                    else _bdState.collapsed.add(key);
+                    renderSide();
+                };
+                it.append(ch);
+            }
+            // 文件夹图标：所有行都有，父目录行是「箭头+图标」，层级一眼可辨
+            it.insertAdjacentHTML("beforeend", IC.folder);
             const s = document.createElement("span");
+            s.className = "lbl";
             s.textContent = label;
             const c = document.createElement("span");
             c.className = "n";
             c.textContent = n;
             it.append(s, c);
-            it.onclick = () => { _bdState.dir = dir; renderSide(); renderList(); };
+            it.onclick = () => { _bdState.dir = dir; renderSide(); renderBody(); };
             side.append(it);
         };
-        mk("全部", null, all);
-        dirsOf((node.__wm2All || []).filter((p) => {
-            const kw2 = _bdState.kw.trim().toLowerCase();
-            return !kw2 || norm(p).toLowerCase().includes(kw2);
-        })).forEach(([d, n]) => mk(d, d, n));
+        row("全部", null, all, 0, false, "");
+        const walk = (map, depth) => {
+            [...map.values()].sort((a, b) => a.name.localeCompare(b.name)).forEach((nd) => {
+                row(nd.name, nd.path, nd.count, depth, nd.kids.size > 0, nd.path);
+                if (!_bdState.collapsed.has(nd.path)) walk(nd.kids, depth + 1);
+            });
+        };
+        walk(treeOf(kwFiltered()).kids, 0);
     }
     // 选中态只改 class，不重建列表（多选时每点一次都重排一次会闪）
     function refreshSelUI() {
@@ -1349,10 +1470,92 @@ function openModal(node, gi, opts = {}) {
             const tg = it.querySelector(".wm2-tgl");
             if (tg) tg.className = on ? "wm2-tgl on" : "wm2-tgl";
         });
+        grid.querySelectorAll(".wm2-card").forEach((cd) => {
+            cd.classList.toggle("sel", _bdState.sel.has(cd.dataset.p));
+        });
         cnt.textContent = repl
             ? (_bdState.sel.size ? `换成：${stemOf(baseOf([..._bdState.sel][0]))}` : "单选一个 LoRA")
             : `已选 ${_bdState.sel.size} 个 · 可多选`;
         ok.disabled = _bdState.sel.size === 0;
+    }
+    // 角标文案：替换模式标「当前」；往配方里加时标出「外面已有 / 组内已有」，但仍然可选
+    function chipOf(p, used) {
+        if (repl && norm(p) === norm(repl.name)) return "当前";
+        if (!repl && gi >= 0) {
+            const inGrp = (node.__wm2Stack[gi]?.loras || []).some((l) => norm(l.name) === norm(p));
+            if (inGrp) return "组内已有";
+            if (used.has(norm(p))) return "外面已有";
+        } else if (!repl && gi < 0 && inAnyGroup(node, p)) return "配方里已有";   // 只是提示，内外可以同时挂
+        else if (repl && used.has(norm(p))) return "外面已有";   // 替换到顶层重名会被拦，先给个提示
+        return "";
+    }
+    // 两种视图共用的点选逻辑（网格卡片与列表条目行为完全一致）
+    function togglePick(p) {
+        if (repl) { _bdState.sel.clear(); _bdState.sel.add(p); }   // 单选
+        else if (_bdState.sel.has(p)) _bdState.sel.delete(p);
+        else _bdState.sel.add(p);
+        refreshSelUI();
+    }
+    function emptyText() {
+        return repl ? "没有可选的 LoRA"
+            : gi >= 0 ? "没有匹配的 LoRA" : "没有匹配的 LoRA（顶层已添加过的不再出现）";
+    }
+    // 缩略图网格：上图下名 + 右上角勾选圈；卡片自带预览图，不再挂悬停浮窗
+    function renderGrid() {
+        grid.innerHTML = "";
+        const its = items();
+        const used = usedTopPaths(node);
+        ginfo.innerHTML = "";
+        const b = document.createElement("b");
+        b.textContent = _bdState.dir === null ? "全部" : _bdState.dir;
+        ginfo.append(b, document.createTextNode(` · ${Math.min(its.length, 200)} 个${its.length > 200 ? "（仅显示前 200）" : ""}`));
+        if (!its.length) {
+            const e = document.createElement("div");
+            e.className = "wm2-empty";
+            e.textContent = emptyText();
+            grid.append(e);
+            return;
+        }
+        its.slice(0, 200).forEach((p) => {
+            const on = _bdState.sel.has(p);
+            const cd = document.createElement("div");
+            cd.className = "wm2-card" + (on ? " sel" : "");
+            cd.dataset.p = p;
+            const im = document.createElement("div");
+            im.className = "im";
+            const abG = document.createTextNode(stemOf(baseOf(p)).slice(0, 2).toUpperCase());
+            im.append(abG);
+            const img = document.createElement("img");
+            img.loading = "lazy";
+            img.alt = "";
+            img.onerror = () => img.remove();
+            img.onload = () => abG.remove();  // 同列表：有图撤文字，无图留首字母兜底
+            img.src = previewUrl(p);
+            im.append(img);
+            const cap = document.createElement("div");
+            cap.className = "cap";
+            const t = document.createElement("span");
+            t.className = "t";
+            t.textContent = stemOf(baseOf(p));
+            t.title = p;
+            const d = document.createElement("span");
+            d.className = "d";
+            d.textContent = dirOf(p) || "根目录";
+            cap.append(t, d);
+            const chk = document.createElement("span");
+            chk.className = "chk";
+            chk.innerHTML = CHECK_SVG;
+            const chip = chipOf(p, used);
+            cd.append(im, cap, chk);
+            if (chip) {
+                const lab = document.createElement("span");
+                lab.className = "tagu";
+                lab.textContent = chip;
+                cd.append(lab);
+            }
+            cd.onclick = () => togglePick(p);
+            grid.append(cd);
+        });
     }
     function renderList() {
         list.innerHTML = "";
@@ -1361,8 +1564,7 @@ function openModal(node, gi, opts = {}) {
         if (!its.length) {
             const e = document.createElement("div");
             e.className = "wm2-empty";
-            e.textContent = repl ? "没有可选的 LoRA"
-                : gi >= 0 ? "没有匹配的 LoRA" : "没有匹配的 LoRA（顶层已添加过的不再出现）";
+            e.textContent = emptyText();
             list.append(e);
         }
         its.slice(0, 200).forEach((p) => {
@@ -1372,10 +1574,12 @@ function openModal(node, gi, opts = {}) {
             it.dataset.p = p;
             const th = document.createElement("span");
             th.className = "th";
-            th.textContent = stemOf(baseOf(p)).slice(0, 2).toUpperCase();
+            const abT = document.createTextNode(stemOf(baseOf(p)).slice(0, 2).toUpperCase());
+            th.append(abT);
             const im = document.createElement("img");
             im.loading = "lazy";
             im.onerror = () => im.remove();
+            im.onload = () => abT.remove();   // 图加载成功就撤占位文字，图片满框
             im.src = previewUrl(p);
             th.append(im);
             const nm = document.createElement("span");
@@ -1388,15 +1592,7 @@ function openModal(node, gi, opts = {}) {
             const tg = document.createElement("span");
             tg.className = on ? "wm2-tgl on" : "wm2-tgl";
             it.append(th, nm);
-            // 小角标：替换模式标「当前」；往配方里加时标出「外面已有 / 组内已有」，但仍然可选
-            let chip = "";
-            if (repl && norm(p) === norm(repl.name)) chip = "当前";
-            else if (!repl && gi >= 0) {
-                const inGrp = (node.__wm2Stack[gi]?.loras || []).some((l) => norm(l.name) === norm(p));
-                if (inGrp) chip = "组内已有";
-                else if (used.has(norm(p))) chip = "外面已有";
-            } else if (!repl && gi < 0 && inAnyGroup(node, p)) chip = "配方里已有";   // 只是提示，内外可以同时挂
-            else if (repl && used.has(norm(p))) chip = "外面已有";   // 替换到顶层重名会被拦，先给个提示
+            const chip = chipOf(p, used);
             if (chip) {
                 const lab = document.createElement("span");
                 lab.className = "tagu";
@@ -1404,12 +1600,7 @@ function openModal(node, gi, opts = {}) {
                 it.append(lab);
             }
             it.append(tg);
-            it.onclick = () => {
-                if (repl) { _bdState.sel.clear(); _bdState.sel.add(p); }   // 单选
-                else if (_bdState.sel.has(p)) _bdState.sel.delete(p);
-                else _bdState.sel.add(p);
-                refreshSelUI();
-            };
+            it.onclick = () => togglePick(p);
 // 悬停弹预览：走全局浮层单例，锚点用名称元素
             it.addEventListener("mouseenter", () => {
                 clearTimeout(_pvTimer);
@@ -1420,8 +1611,27 @@ function openModal(node, gi, opts = {}) {
         });
         refreshSelUI();
     }
+    // 按当前视图渲染对应一侧；切换时不重建，勾选集合两边共享
+    function renderBody() {
+        if (_wm2View === "grid") renderGrid();
+        else renderList();
+    }
+    function applyView() {
+        const grid = _wm2View === "grid";
+        m.classList.toggle("wide", grid);
+        // 网格：弹窗高度锁死 80vh，卡片固定 4 列，溢出全部交给网格内部滚动条；
+        // 列表：弹窗按内容自适应（原有行为）
+        m.classList.toggle("gridmode", grid);
+        list.style.display = grid ? "none" : "";
+        gridWrap.style.display = grid ? "" : "none";
+        bList.classList.toggle("on", !grid);
+        bGrid.classList.toggle("on", grid);
+        renderBody();
+    }
+    bList.onclick = () => { _wm2View = "list"; try { localStorage.setItem("WindMix.loraModalView", "list"); } catch (e) {} applyView(); };
+    bGrid.onclick = () => { _wm2View = "grid"; try { localStorage.setItem("WindMix.loraModalView", "grid"); } catch (e) {} applyView(); };
     renderSide();
-    renderList();
+    applyView();
 
     bd.onclick = (e) => { if (e.target === bd) closeModal(); };
 }
@@ -1580,10 +1790,17 @@ function measureBottomGap(node) {
     return { actual: (rect.bottom - cr.bottom) / k, inset, k,
              topOff: (cr.top - rect.top) / k, source: fr.source };
 }
+// 只读探针：给「新建节点收敛」判断是否已经贴底用（不改布局、不打诊断）
+export function bottomGapState(node) {
+    _gapDiagMute = true;
+    try { return measureBottomGap(node); } finally { _gapDiagMute = false; }
+}
 
 // 量不到时往控制台打一次现场几何（最多 6 条）
 let _gapDiagN = 0;
+let _gapDiagMute = false;
 function gapDiag(node, why, ok) {
+    if (_gapDiagMute) return;                    // 探针式调用不占诊断额度
     if (!ok && _gapDiagN >= 6) return;
     if (!ok) _gapDiagN += 1;
     try {

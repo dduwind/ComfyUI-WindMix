@@ -58,6 +58,10 @@ export function attachAutoComplete(ta, opts) {
     return ensureAcWords().then((words) => {
         if (!Object.keys(words).length) return null;
         const ac = new TextAreaAutoComplete(ta, document.body, words);
+        // 打个作用域标记：主页面（预设文本节点的编辑弹窗）里由 windmix_preset_text.js 按
+        // WindMix 自己的浅/深两套配色重画这个下拉。上游样式全靠 --bg-color/--fg-color，
+        // 浅色主题一旦没定义这几个变量就退回深底深字，整块下拉在浅色界面里是个黑盒子。
+        if (ac.dropdown && ac.dropdown.classList) ac.dropdown.classList.add("wm2-ac-scope");
         // 上游下拉默认 position:static（为嵌入式布局设计），这里改成「跟随光标的 fixed」
         // 并压在模态之上。#update 每次刷新都会调 getCursorOffset，在这里顺带定位即可，
         // 无需侵入上游类。

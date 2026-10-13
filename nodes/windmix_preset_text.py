@@ -10,7 +10,7 @@
 # {
 #   "folders": [ {"id": str, "name": str, "entries": [ {"id","enabled","title","content"}, ... ]}, ... ],
 #   "rootEntries": [ {"id": str, "enabled": bool, "title": str, "content": str}, ... ],
-#   "separator": ",\\n\\n",
+#   "separator": ",\\n---\\n",
 #   "randomEnabled": false,
 #   "randomCount": 1
 # }
@@ -138,9 +138,9 @@ class WindMixPresetText:
             final_parts.append(str(可选输入).strip())
 
         # 处理分隔符中的换行符（前端写入的是字面量 \\n）
-        separator = data.get("separator", ",\\n\\n")
+        separator = data.get("separator", ",\\n---\\n")
         if not isinstance(separator, str):
-            separator = ",\\n\\n"
+            separator = ",\\n---\\n"
         processed_sep = separator.replace("\\n", "\n")
 
         output_text = processed_sep.join(final_parts)

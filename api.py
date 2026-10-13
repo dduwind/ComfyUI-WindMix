@@ -271,24 +271,29 @@ async def windmix_preset_text_presets_post(request):
         target_folder = input_data.get("folder") or ""
         target_parent = input_data.get("parent") or ""
         added = 0
+        new_ids = []
         for it in items_in:
             if not isinstance(it, dict):
                 continue
             nm = (it.get("name") or "").strip()
             if not nm:
                 continue
+            new_id = "p_" + _uuid.uuid4().hex[:12]
             presets.append({
-                "id": "p_" + _uuid.uuid4().hex[:12],
+                "id": new_id,
                 "name": nm,
                 "content": it.get("content", "") or "",
                 "folder": target_folder,
                 "parent": target_parent,
                 "image": it.get("image", "") or "",
             })
+            new_ids.append(new_id)
             added += 1
         if added:
             _wm_write_presets(folders, presets)
-            resp = {"success": True, "added": added}
+            # ids 按提交顺序回传，节点「整组保存到预设」靠它把 presetId 一一绑回去，
+            # 不必再靠「同目录+同名」猜（重名条目会绑错）。
+            resp = {"success": True, "added": added, "ids": new_ids}
         else:
             resp = {"success": False, "message": "没有可添加的预设"}
 
