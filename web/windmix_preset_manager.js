@@ -121,9 +121,14 @@ function injectStyle() {
 .wm-pm-big { margin-top:12px; flex-shrink:0; }
 .wm-pm-big-head { display:flex; align-items:center; gap:7px; padding:6px 10px; cursor:pointer; color:var(--ink2); border-radius:9px; }
 .wm-pm-big-head:hover { background:var(--srf); }
-.wm-pm-chev { width:9px; height:9px; border-right:1.8px solid var(--ink3); border-bottom:1.8px solid var(--ink3);
-  transform:rotate(-45deg); transition:transform .18s; flex:none; margin:0 4px; }
-.wm-pm-big.expanded .wm-pm-chev { transform:rotate(45deg); }
+/* 折叠箭头：整个 20×20 都是命中区（箭头画在 ::after 上），只点那根细线太难瞄 */
+.wm-pm-chev { width:20px; height:20px; flex:none; display:flex; align-items:center; justify-content:center;
+  border-radius:6px; cursor:pointer; transition:background .14s; }
+.wm-pm-chev::after { content:""; width:9px; height:9px; border-right:1.8px solid var(--ink3);
+  border-bottom:1.8px solid var(--ink3); transform:rotate(-45deg); transition:transform .18s; }
+.wm-pm-chev:hover { background:var(--srf2); }
+.wm-pm-chev:hover::after { border-color:var(--violet); }
+.wm-pm-big.expanded .wm-pm-chev::after { transform:rotate(45deg); }
 .wm-pm-cname { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .wm-pm-big .wm-pm-cname { font-size:12.5px; font-weight:700; letter-spacing:.5px; }
 .wm-pm-count { font-size:10.5px; color:var(--ink3); background:var(--srf2); border-radius:999px; padding:2px 9px; flex:none; }
@@ -162,8 +167,10 @@ function injectStyle() {
 .wm-pm-right { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; }
 .wm-pm-vhead { flex:none; flex-shrink:0; padding:22px 30px 0; display:flex; align-items:flex-end;
   justify-content:space-between; gap:16px; }
+/* 左块必须自己占满剩余宽度并允许收缩，否则标题那条 max-width 会算出极小值而被截成几个字 */
+.wm-pm-vhead-l { flex:1; min-width:0; }
 .wm-pm-vhead .ttl { font-family:var(--serif); font-size:27px; font-weight:600; letter-spacing:.5px; line-height:1.15;
-  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:70%; }
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
 .wm-pm-vhead .ttl em { font-style:normal; background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent; }
 .wm-pm-vhead .meta { margin-top:7px; font-size:11.5px; color:var(--ink3); letter-spacing:.4px; }
 .wm-pm-vhead .meta b { color:var(--violet); font-weight:600; }
@@ -242,6 +249,7 @@ function injectStyle() {
   border-radius:13px; background:var(--srf); cursor:pointer; transition:.15s; }
 .wm-pm-row:hover { border-color:rgba(139,124,247,.45); background:var(--srf2); }
 .wm-pm-row.selected { border-color:var(--violet); background:rgba(139,124,247,.08); }
+.wm-pm-row.drop-target { border-color:var(--violet); box-shadow:0 0 0 3px rgba(139,124,247,.35); }
 .wm-pm-row .th { width:52px; height:52px; border-radius:10px; flex:none; background-size:cover;
   background-position:center; background-color:var(--srf3); display:flex; align-items:center; justify-content:center;
   color:var(--ink3); cursor:pointer; border:1px solid var(--line); }
@@ -1272,11 +1280,9 @@ function buildCard(p) {
     const ph = card.querySelector(".ph");
     if (ph) ph.addEventListener("click", (e) => { e.stopPropagation(); openLightbox(p); });
 
-    // 标题信息区：单击=选中/取消（220ms 防抖避开双击）；双击名称=行内改名；整区可拖=归类
+    // 标题信息区：单击=选中/取消（220ms 防抖避开双击）；双击名称=行内改名
     const info = card.querySelector(".info");
     const nm = card.querySelector(".nm");
-    info.draggable = true;
-    info.title = "单击选中 · 双击改名 · 拖到左侧分类可移动";
     let clickTimer = null;
     info.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -1288,13 +1294,18 @@ function buildCard(p) {
         if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
         startInlinePresetRename(nm, p);
     });
-    info.addEventListener("dragstart", (e) => {
+    // 整张卡片都可以发起拖拽（拖到左栏目录=移动，拖到别的卡片上=调序），
+    // 只有行内改名框里除外，否则选字会被当成拖拽。
+    card.draggable = true;
+    card.title = "拖动=移到左侧分类 / 拖到别的卡片上=调序 · 单击选中 · 双击改名";
+    card.addEventListener("dragstart", (e) => {
+        if (e.target.closest && e.target.closest("input,textarea")) { e.preventDefault(); return; }
         e.dataTransfer.setData("text/plain", p.id);
         e.dataTransfer.effectAllowed = "move";
         card.classList.add("dragging");
         try { e.dataTransfer.setDragImage(card, 20, 20); } catch (_) {}
     });
-    info.addEventListener("dragend", () => card.classList.remove("dragging"));
+    card.addEventListener("dragend", () => card.classList.remove("dragging"));
 
     // 卡片其余区域单击=选中
     card.addEventListener("click", () => togglePresetSelected(p, card));
@@ -1380,6 +1391,34 @@ function buildRow(p) {
     });
     // 点击行 = 选中/取消
     row.addEventListener("click", () => togglePresetSelected(p, row));
+    // 整行可拖：拖到左栏目录=移动，拖到别的行上=调序（按上下半区插到前/后）
+    row.draggable = true;
+    row.title = "拖动=移到左侧分类 / 拖到别的行上=调序 · 单击选中（可批量发送）";
+    row.addEventListener("dragstart", (e) => {
+        if (e.target.closest && e.target.closest("input,textarea")) { e.preventDefault(); return; }
+        e.dataTransfer.setData("text/plain", p.id);
+        e.dataTransfer.effectAllowed = "move";
+        row.classList.add("dragging");
+        try { e.dataTransfer.setDragImage(row, 20, 20); } catch (_) {}
+    });
+    row.addEventListener("dragend", () => row.classList.remove("dragging"));
+    row.addEventListener("dragover", (e) => {
+        const t = (e.dataTransfer && e.dataTransfer.types) || [];
+        if (Array.from(t).includes("Files")) return;   // 拖图片进缩略图由 .th 自己接
+        e.preventDefault();
+        row.classList.add("drop-target");
+    });
+    row.addEventListener("dragleave", () => row.classList.remove("drop-target"));
+    row.addEventListener("drop", (e) => {
+        row.classList.remove("drop-target");
+        const id = e.dataTransfer.getData("text/plain");
+        if (!id || id === p.id) return;
+        if (!state.presets.some((x) => x.id === id)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const rect = row.getBoundingClientRect();
+        reorderPreset(id, p.id, (e.clientY - rect.top) > rect.height / 2);
+    });
     return row;
 }
 
@@ -1761,6 +1800,7 @@ function buildModal() {
     const vhead = document.createElement("div");
     vhead.className = "wm-pm-vhead";
     const vleft = document.createElement("div");
+    vleft.className = "wm-pm-vhead-l";
     const vTitle = document.createElement("div");
     vTitle.className = "ttl";
     const vMeta = document.createElement("div");

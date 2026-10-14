@@ -439,7 +439,10 @@ html.dark-theme .wm2-modal, html.dark-theme .wm2-pv {
 .wm2-gh { display:flex; align-items:center; gap:6px; padding:5px 7px; background:var(--wm-lo-grphead);
   cursor:grab; user-select:none; }
 .wm2-gh:active { cursor:grabbing; }
-.wm2-gh .chev { flex:none; color:var(--wm-lo-accent); display:inline-flex; transition:transform .15s; }
+/* 折叠箭头做成 20×20 的按钮盒，整块都是命中区；只点那根细线太难瞄 */
+.wm2-gh .chev { flex:none; width:20px; height:20px; color:var(--wm-lo-accent); display:inline-flex;
+  align-items:center; justify-content:center; border-radius:6px; transition:background .14s, transform .15s; }
+.wm2-gh .chev:hover { background:var(--wm-lo-accent-soft); }
 .wm2-grp.closed .wm2-gh .chev { transform:rotate(-90deg); }
 .wm2-gh .fic { flex:none; color:var(--wm-lo-accent); display:inline-flex; }
 .wm2-gname { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;

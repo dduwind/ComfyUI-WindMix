@@ -417,18 +417,27 @@ function fetchLib(force) {
         .then((d) => {
             const map = new Map();
             ((d && d.presets) || []).forEach((p) => { if (p && p.id) map.set(p.id, p); });
-            _lib = { at: Date.now(), ok: !!d, map: d ? map : (_lib.map || null) };
+            // 名称索引：库里同名往往就是同一条文本（从管理器发过来的行没带 id 时靠它认亲），
+            // 也用它拦下「同名再存一份」这种重复项。
+            const byName = new Map();
+            map.forEach((p) => {
+                const k = (p.name || "").trim();
+                if (!byName.has(k)) byName.set(k, []);
+                byName.get(k).push(p);
+            });
+            _lib = { at: Date.now(), ok: !!d, map: d ? map : (_lib.map || null),
+                     byName: d ? byName : (_lib.byName || null) };
             _libPromise = null;
             return _lib;
         })
         .catch(() => {
             _libPromise = null;
-            _lib = { at: Date.now(), ok: false, map: _lib.map };
+            _lib = { at: Date.now(), ok: false, map: _lib.map, byName: _lib.byName };
             return _lib;
         });
     return _libPromise;
 }
-function invalidateLib() { _lib = { at: 0, ok: false, map: _lib.map }; _libPromise = null; }
+function invalidateLib() { _lib = { at: 0, ok: false, map: _lib.map, byName: _lib.byName }; _libPromise = null; }
 
 // 写完库 / 库刷新后，把所有还挂着的节点书签重画一遍
 function refreshLib(node) {
@@ -447,7 +456,7 @@ function refreshLib(node) {
 
 // 条目 → 书签状态：none / saved / dirty
 function bkState(entry) {
-    if (!entry || !entry.presetId) return { st: "none" };
+    if (!entry || !entry.presetId) return adoptOrNone(entry);
     const p = _lib.ok && _lib.map ? _lib.map.get(entry.presetId) : null;
     if (!p) {
         // 库读不到（服务没回 / 还没发过请求）：按本地指纹判断，不乱改状态、也不当没存过
@@ -455,7 +464,7 @@ function bkState(entry) {
             const same = !entry.presetHash || entry.presetHash === hashStr(entry.content);
             return { st: same ? "saved" : "dirty", where: "", pending: true };
         }
-        return { st: "none" };        // 库里那条已被删：当作没存过，不额外提醒
+        return adoptOrNone(entry);     // 绑的那条已被删：先认认库里有没有同名同内容的，再退回没存过
     }
     const where = whereOf(p);
     // 名称就是这条预设的身份：行上把名称改了，等于「要的是另一条预设」，书签回到灰空心，
@@ -464,6 +473,36 @@ function bkState(entry) {
     if (!titleSame) return { st: "none", renamed: true, where, p };
     const same = (entry.content || "") === (p.content || "");
     return { st: same ? "saved" : "dirty", where, p };
+}
+// 库里同名且内容一致的那条（行上没绑 id 时的认亲依据）
+function matchLib(entry) {
+    if (!entry || !_lib.byName) return null;
+    const arr = _lib.byName.get((entry.title || "").trim()) || [];
+    return arr.find((p) => (p.content || "") === (entry.content || "")) || null;
+}
+function adoptOrNone(entry) {
+    const m = _lib.ok ? matchLib(entry) : null;
+    if (m) return { st: "saved", where: whereOf(m), p: m, auto: m.id };
+    return { st: "none" };
+}
+// 同名查重：exact=库里已有同名同内容的一条（直接绑，不用再存）；other=同名但内容不同
+function dupCheck(name, content) {
+    const arr = (_lib.byName && _lib.byName.get(name)) || [];
+    return { exact: arr.find((p) => (p.content || "") === (content || "")) || null,
+             other: arr[0] || null };
+}
+// 把「其实库里早就有」的行绑回那条预设：以后改内容才是覆盖，而不是又存一份重复的
+function adoptBindings(node) {
+    if (!node.__stData || !_lib.ok || !_lib.byName) return false;
+    let changed = false;
+    (node.__stData.items || []).forEach((it) => {
+        const es = it.kind === "folder" ? (it.entries || []) : [it];
+        es.forEach((e) => {
+            const m = matchLib(e);
+            if (m && e.presetId !== m.id) { e.presetId = m.id; e.presetHash = hashStr(e.content); changed = true; }
+        });
+    });
+    return changed;
 }
 function whereOf(p) {
     const f = p.folder || "未分类";
@@ -567,8 +606,26 @@ function saveEntryToLib(node, entry) {
             warn(node, `已覆盖更新「${info.where}」`);
             return;
         }
-        // 没存过 → 新建一条，落在「未分类 / 未分类」（与旧版行为一致）
+        // 没存过 → 先查重再新建：库里已经有同名同内容的那条就直接绑，同名不同内容就拦下来，
+        // 免得点一次书签多一条重复预设。
         const name = (entry.title || "").trim() || "未命名";
+        await fetchLib(false);
+        if ((entry.title || "").trim()) {
+            const dup = dupCheck(name, entry.content || "");
+            if (dup.exact) {
+                bindEntry(entry, dup.exact.id);
+                invalidateLib();
+                await refreshLib(node);
+                saveData(node);
+                warn(node, `库里「${whereOf(dup.exact)}」已经有同名同内容的一条，已直接绑定，没有重复保存`);
+                return;
+            }
+            if (dup.other) {
+                warn(node, `库里已有同名预设「${name}」（在「${whereOf(dup.other)}」），但内容不一样 · ` +
+                           `换个名称再存，或先到预设管理器里改那条`, true);
+                return;
+            }
+        }
         const M = window.WindMixPresetManager;
         let newId = "";
         if (M && M.importPreset) {
@@ -619,9 +676,22 @@ function saveFolderToLib(node, folder) {
             });
             if (r && r.success) { e.presetHash = hashStr(e.content); updated += 1; }
         }
+        let reused = 0;       // 库里已有同名同内容，直接绑
+        let skipped = 0;      // 同名但内容不同，拦下来不新建
         if (fresh.length) {
+            await fetchLib(false);
+            const keep = [];
+            fresh.forEach((e) => {
+                const nm = (e.title || "").trim();
+                if (!nm) { keep.push(e); return; }
+                const d = dupCheck(nm, e.content || "");
+                if (d.exact) { bindEntry(e, d.exact.id); reused += 1; }
+                else if (d.other) { skipped += 1; }
+                else keep.push(e);
+            });
+            if (keep.length) {
             const fname = ((folder.name || "新建文件夹").trim()) || "新建文件夹";
-            const items = fresh.map((e) => ({ name: e.title || "未命名", content: e.content || "" }));
+            const items = keep.map((e) => ({ name: e.title || "未命名", content: e.content || "" }));
             const M = window.WindMixPresetManager;
             let okAdd = false;
             let ids = [];
@@ -639,16 +709,16 @@ function saveFolderToLib(node, folder) {
                 if (!r || !r.success) { warn(node, (r && r.message) || "整组保存失败", true); return; }
                 if (Array.isArray(r.ids)) ids = r.ids;
             }
-            if (ids.length === fresh.length) {
+            if (ids.length === keep.length) {
                 // 后端把新建的 id 按提交顺序原样回传，直接一一对应绑上，不用猜名字
-                fresh.forEach((e, i) => bindEntry(e, ids[i]));
+                keep.forEach((e, i) => bindEntry(e, ids[i]));
             } else {
                 // 旧版后端没回 ids：重新读库，按「同目录 + 同名，内容一致优先」把 id 绑回去，
                 // 匹配到一个就从池子里摘掉，避免重名条目全绑到同一条预设上
                 const lib = await fetchLib(true);
                 const pool = [];
                 if (lib.map) lib.map.forEach((p) => { if ((p.folder || "未分类") === fname) pool.push(p); });
-                fresh.forEach((e) => {
+                keep.forEach((e) => {
                     const nm = e.title || "未命名";
                     let i = pool.findIndex((p) => (p.name || "") === nm && (p.content || "") === (e.content || ""));
                     if (i < 0) i = pool.findIndex((p) => (p.name || "") === nm);
@@ -656,19 +726,26 @@ function saveFolderToLib(node, folder) {
                     else e.presetHash = hashStr(e.content);
                 });
             }
+            }
         }
         invalidateLib();
         await refreshLib(node);
         saveData(node);
+        const extra = [];
+        if (reused) extra.push(`库里已有 ${reused} 条同名同内容，直接绑定`);
+        if (skipped) extra.push(`${skipped} 条同名但内容不同，没另存（要存请先改名）`);
         const st = folderBkState(folder);
-        warn(node, st.st === "saved" ? `已把「${folder.name || "新建文件夹"}」整组存进预设库（${es.length} 条）`
-                                     : `已覆盖更新 ${updated} 条，其余还没读到库，稍后书签会自动确认`);
+        warn(node, (st.st === "saved" ? `已把「${folder.name || "新建文件夹"}」整组存进预设库（${es.length} 条）`
+                                      : `已覆盖更新 ${updated} 条，其余还没读到库，稍后书签会自动确认`)
+                     + (extra.length ? " · " + extra.join(" · ") : ""));
     });
 }
 
 function paintBookmarks(node) {
     const c = node.__wm2Container;
     if (!c) return;
+    // 先认亲：内容/名称和库里某条完全对得上（哪怕没绑过 id）就当它已经存过，并把 id 绑上
+    if (adoptBindings(node)) saveData(node);
     c.querySelectorAll(".wm2-bk").forEach((el) => {
         const fid = el.dataset.folderId;
         const info = fid != null
@@ -816,19 +893,23 @@ function folderCard(node, folder) {
     chev.className = "chev";
     chev.innerHTML = IC.chev;
     chev.title = closed ? "展开文件夹" : "折叠文件夹";
-    chev.addEventListener("click", (e) => {
-        e.stopPropagation();
+    const toggleCollapse = () => {
         folder.collapsed = !folder.collapsed;
         card.classList.toggle("closed", folder.collapsed);
         chev.title = folder.collapsed ? "展开文件夹" : "折叠文件夹";
         saveData(node);
-    });
+    };
+    chev.addEventListener("click", (e) => { e.stopPropagation(); toggleCollapse(); });
     gh.append(chev);
 
+    // 这个开关不会触发重绘（不重建列表），必须把新状态返回给 makeToggle 画回去，
+    // 否则数据改了、勾还停在原位。
     gh.append(makeToggle(folder.enabled, () => {
         folder.enabled = folder.enabled === false;
         card.classList.toggle("off", !folder.enabled);
         saveData(node);
+        paintCount(node);
+        return folder.enabled;
     }, "启用整个文件夹（勾掉则整组不参与拼接输出）"));
 
     const fic = document.createElement("span");
@@ -884,6 +965,13 @@ function folderCard(node, folder) {
         if (i >= 0) { node.__stData.items.splice(i, 1); saveData(node); renderList(node, true); }
     });
     gh.append(del);
+
+    // 点组头空白处也折叠（和 LoRA 配方组一致）；名称要留着双击改名，
+    // 勾选/书签/删除/计数各有自己的动作，都不参与。
+    gh.addEventListener("click", (e) => {
+        if (e.target.closest && e.target.closest(".wm2-gname,.wm2-rename,.wm2-tgl,.wm2-bk,.wm2-ico,.wm2-gcnt")) return;
+        toggleCollapse();
+    });
 
     // 整组从组头拖（和 LoRA 配方组一致；共用件的 .wm2-gh 本来就是 cursor:grab）
     gh.draggable = true;
@@ -1301,6 +1389,32 @@ function buildUI(node) {
     fetchLib(false).then(() => paintBookmarks(node));
 }
 
+// 按「真正参与拼接的行数」统计：文件夹只是组织方式，里面每一条各算一行；
+// 文件夹整体关掉时，它里面的行一条都不算生效。
+function enableStats(items) {
+    let total = 0, on = 0;
+    (items || []).forEach((it) => {
+        if (it.kind === "folder") {
+            const es = it.entries || [];
+            total += es.length;
+            if (it.enabled !== false) es.forEach((e) => { if (e.enabled) on += 1; });
+        } else {
+            total += 1;
+            if (it.enabled) on += 1;
+        }
+    });
+    return { total, on };
+}
+
+// 表头那个计数：勾掉整个文件夹不会重绘列表，数字得自己跟着回写一次
+function paintCount(node) {
+    const c = node.__wm2Container;
+    const el = c && c.querySelector(".wm2-lhead .act");
+    if (!el) return;
+    const s = enableStats(node.__stData && node.__stData.items);
+    el.textContent = `${s.on}/${s.total}`;
+}
+
 function renderList(node, keepScroll) {
     const list = node.__stList;
     if (!list) return;
@@ -1311,9 +1425,8 @@ function renderList(node, keepScroll) {
     const top = keepScroll ? list.scrollTop : 0;
     list.innerHTML = "";
 
-    let total = items.length;
-    let on = 0;
-    items.forEach((it) => { if (it.enabled) on += 1; });
+    const s = enableStats(items);
+    const total = s.total, on = s.on;
 
     const head = document.createElement("div");
     head.className = "wm2-lhead";
@@ -1323,7 +1436,10 @@ function renderList(node, keepScroll) {
     tallob.className = "tallob";
     tallob.append(makeToggle(allOn, () => {
         const turnOn = !allOn;
-        items.forEach((it) => { it.enabled = turnOn; });
+        items.forEach((it) => {
+            it.enabled = turnOn;
+            if (it.kind === "folder") (it.entries || []).forEach((e) => { e.enabled = turnOn; });
+        });
         saveData(node);
         renderList(node, true);
     }, allOn ? "全部停用" : "全部启用"));
@@ -1336,6 +1452,7 @@ function renderList(node, keepScroll) {
     const cnt = document.createElement("span");
     cnt.className = "act";
     cnt.textContent = `${on}/${total}`;
+    cnt.title = "生效行数 / 总行数（文件夹关闭时它里面的行不计入生效）";
     head.append(cnt);
 
     const sl = document.createElement("span");
