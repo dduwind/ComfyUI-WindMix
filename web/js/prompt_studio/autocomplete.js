@@ -273,8 +273,22 @@ export class TextAreaAutoComplete {
         const prefixMatches = [];
         const includesMatches = [];
 
-        for (const word of Object.keys(this.words)) {
-            const loweredWord = word.toLowerCase();
+        // 键列表缓存：按词库对象引用缓存（WeakMap），避免每次按键重新分配 ~2.4 万长度的数组
+        const words = this.words;
+        if (!TextAreaAutoComplete._keyCacheMap) TextAreaAutoComplete._keyCacheMap = new WeakMap();
+        let keys = TextAreaAutoComplete._keyCacheMap.get(words);
+        if (!keys) {
+            keys = Object.keys(words);
+            TextAreaAutoComplete._keyCacheMap.set(words, keys);
+        }
+
+        const SUGGEST = TextAreaAutoComplete.suggestionCount;
+        for (let i = 0; i < keys.length; i++) {
+            const word = keys[i];
+            const wordInfo = words[word];
+            // 小写结果懒缓存到 wordInfo 上：首次算一次，之后所有按键复用，
+            // 避免每次按键对 2.4 万词反复 toLowerCase
+            const loweredWord = wordInfo._lower != null ? wordInfo._lower : (wordInfo._lower = word.toLowerCase());
             if (loweredWord === loweredTerm) {
                 continue;
             }
@@ -284,11 +298,13 @@ export class TextAreaAutoComplete {
                 continue;
             }
 
-            const wordInfo = this.words[word];
             if (wordInfo.priority) {
                 priorityMatches.push({ pos, wordInfo });
             } else if (pos === 0) {
                 prefixMatches.push({ pos, wordInfo });
+                // 前缀命中按热度（词库序）排在最前，已凑满一屏候选即可提前结束扫描，
+                // 省掉后面几万词的 includes 扫描（slice 后也会丢弃）
+                if (prefixMatches.length >= SUGGEST) break;
             } else {
                 includesMatches.push({ pos, wordInfo });
             }
@@ -321,6 +337,13 @@ export class TextAreaAutoComplete {
             this.#hide();
             return;
         }
+
+        // 去重：同一内容片段的重复触发（如 keypress 后紧接 keyup）直接跳过扫描，
+        // 砍掉约一半的无谓全量遍历。下拉已显示且片段未变时无需重算。
+        if (before === this._lastTerm && this.dropdown.parentElement) {
+            return;
+        }
+        this._lastTerm = before;
 
         this.currentWords = this.#getFilteredWords(before);
         if (!this.currentWords.length) {

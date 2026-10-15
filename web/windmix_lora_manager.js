@@ -774,42 +774,69 @@ function makeToggle(on, onclick, title) {
     return t;
 }
 
+// 横向拖动统一入口：指针捕获在触发它的那个元素上，鼠标跑到节点外面也照样收得到事件；
+// pointerup / pointercancel / 失去捕获 / 任何一次「没按键的 move」都会结束本次拖动，
+// 所以就算漏掉一次 pointerup 也不会变成「鼠标一动数值就跟着动」。
+let _drag = null;
+function dragX(el, ev, onMove, onEnd) {
+    if (_drag) _drag.stop();
+    const pid = ev.pointerId, sx = ev.clientX;
+    let moved = false, done = false;
+    const mv = (m) => {
+        if (m.pointerId != null && m.pointerId !== pid) return;
+        if (!(m.buttons & 1)) { self.stop(); return; }
+        if (!moved && Math.abs(m.clientX - sx) < 4) return;
+        moved = true;
+        onMove(m, m.clientX - sx);
+    };
+    const stop = () => {
+        if (done) return;
+        done = true;
+        el.removeEventListener("pointermove", mv);
+        el.removeEventListener("pointerup", stop);
+        el.removeEventListener("pointercancel", stop);
+        el.removeEventListener("lostpointercapture", stop);
+        if (_drag === self) _drag = null;
+        onEnd(moved);
+    };
+    const self = { stop };
+    _drag = self;
+    el.addEventListener("pointermove", mv);
+    el.addEventListener("pointerup", stop);
+    el.addEventListener("pointercancel", stop);
+    el.addEventListener("lostpointercapture", stop);
+    try { el.setPointerCapture(pid); } catch (e) {}
+}
+
 function makeStrength(node, entry) {
     const inp = document.createElement("input");
     inp.className = "wm2-sv";
     inp.type = "number";
     inp.step = "0.05";
     inp.value = entry.model.toFixed(2);
-    const paint = () => {
-        inp.value = entry.model.toFixed(2);
+    // 进度条只吃数值，不动输入框里的字——打字途中回写 value 会把光标甩到末尾，
+    // 于是「想输 0.75」被吃成 0.001、再输就只剩 0.01 这种量级。
+    const paintBar = () => {
         inp.style.setProperty("--v", Math.max(0, Math.min(100, (Math.abs(entry.model) / 2) * 100)) + "%");
     };
-    paint();
+    const paint = () => { inp.value = entry.model.toFixed(2); paintBar(); };
+    paintBar();
     // 横向拖动改强度：0.001/px，Shift=×10，Alt=×0.1；4px 阈值内不当作拖动
     inp.addEventListener("pointerdown", (ev) => {
         if (ev.button !== 0) return;
         ev.stopPropagation();
-        const sx = ev.clientX, sv = entry.model;
-        let moved = false;
-        const mv = (m) => {
-            const dx = m.clientX - sx;
-            if (!moved && Math.abs(dx) < 4) return;
-            moved = true;
-            const mult = m.shiftKey ? 10 : m.altKey ? 0.1 : 1;
-            entry.model = clampStep(Math.max(-10, Math.min(10, sv + dx * 0.001 * mult)));
-            paint();
-        };
-        const up = () => {
-            document.removeEventListener("pointermove", mv);
-            document.removeEventListener("pointerup", up);
-            if (moved) { syncData(node); renderRows(node, true); }
-        };
-        document.addEventListener("pointermove", mv);
-        document.addEventListener("pointerup", up);
+        const sv = entry.model;
+        dragX(inp, ev,
+            (m, dx) => {
+                const mult = m.shiftKey ? 10 : m.altKey ? 0.1 : 1;
+                entry.model = clampStep(Math.max(-10, Math.min(10, sv + dx * 0.001 * mult)));
+                paint();
+            },
+            () => syncData(node));
     });
     inp.addEventListener("input", () => {
         const v = parseFloat(inp.value);
-        if (Number.isFinite(v)) { entry.model = v; syncData(node); paint(); }
+        if (Number.isFinite(v)) { entry.model = v; syncData(node); paintBar(); }
     });
     inp.addEventListener("blur", () => {
         let v = parseFloat(inp.value);
@@ -1160,25 +1187,18 @@ function renderRows(node, keepScroll) {
         ev.stopPropagation();
         const rows = activeRows(node).map((r) => ({ entry: r.entry, orig: r.entry.model }));
         if (!rows.length) return;
-        const sx = ev.clientX;
-        let moved = false;
         const hint = head.querySelector(".hint");
-        const mv = (m) => {
-            if (!moved && Math.abs(m.clientX - sx) < 4) return;
-            moved = true;
-            const k = 1 + (m.clientX - sx) * 0.0005;
-            rows.forEach((r) => { r.entry.model = clampStep(Math.max(-10, Math.min(10, r.orig * k))); });
-            if (hint) { hint.textContent = `×${k.toFixed(2)}`; hint.style.opacity = 1; hint.style.color = "var(--wm-lo-accent)"; }
-            paintAllStrength(node);
-        };
-        const up = () => {
-            document.removeEventListener("pointermove", mv);
-            document.removeEventListener("pointerup", up);
-            syncData(node);
-            renderRows(node, true);
-        };
-        document.addEventListener("pointermove", mv);
-        document.addEventListener("pointerup", up);
+        dragX(head, ev,
+            (m, dx) => {
+                const k = 1 + dx * 0.0005;
+                rows.forEach((r) => { r.entry.model = clampStep(Math.max(-10, Math.min(10, r.orig * k))); });
+                if (hint) { hint.textContent = `×${k.toFixed(2)}`; hint.style.opacity = 1; hint.style.color = "var(--wm-lo-accent)"; }
+                paintAllStrength(node);
+            },
+            (moved) => {
+                syncData(node);
+                if (moved && hint) { hint.textContent = "↔ 拖动等比调全部"; hint.style.opacity = ""; hint.style.color = ""; }
+            });
     });
     list.append(head);
 
