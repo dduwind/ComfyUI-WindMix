@@ -182,8 +182,9 @@ function hashStr(s) {
     return h.toString(16);
 }
 
+// kind 不能省：后端只认 kind=="entry" 的行，删除/拖拽也按它查，缺了这一行会「加进去但既不出图也删不掉」
 function defaultEntry() {
-    return { id: genId(), enabled: true, title: "", content: "", presetId: "", presetHash: "" };
+    return { kind: "entry", id: genId(), enabled: true, title: "", content: "", presetId: "", presetHash: "" };
 }
 
 // 全新节点（没有任何条目）默认带一个空白文本框，避免创建后没有任何可输入区域。
