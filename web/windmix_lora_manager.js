@@ -11,7 +11,7 @@ import { app } from "/scripts/app.js";
 //   {loras:[...]}                                  —— 包裹形（历史兼容）
 //
 // 文件里标了 export 的部分是「共用件」（样式 / 图标 / 路径工具 / 隐藏控件 / 底距几何引擎），
-// web/windmix_xy_unet_manager.js（UNet2）直接 import 过去，保证两个节点同一套配色和按钮。
+// web/windmix_xy_unet_manager.js（UNet）直接 import 过去，保证两个节点同一套配色和按钮。
 // 几何引擎按 node.__wm2* 这组字段名读缓存，用它的节点必须沿用同样的字段名。
 // =============================================================================
 
@@ -71,11 +71,31 @@ function previewUrl(name) {
         `&name=${encodeURIComponent(name)}&v=${_previewVer}`;
 }
 
+// R 刷新 = 命令 Comfy.RefreshNodeDefinitions → app.refreshComboInNodes()，新前端已经没有
+// app.refreshCombo 这个方法了，所以官方扩展钩子（见文件末尾 registerExtension）才是主路径，
+// 下面这个补丁只作为老版本前端的兜底保留。
+function invalidateCache() {
+    _loraCache = null;
+    _previewVer += 1;   // 同名模型被替换后预览图也要跟着换
+}
+function refreshAllNodes() {
+    invalidateCache();
+    return getLoraFiles(true).then((all) => {
+        (app.graph?._nodes || []).forEach((n) => {
+            if (n && NODE_TYPES.includes(n.type) && n.__wm2Built) refreshKnown(n);
+        });
+        // 刷新时弹窗正开着：直接把它的数据换掉并重画
+        if (_bdState?.node) {
+            _bdState.node.__wm2All = all;
+            _bdState.node.__wm2Known = new Set(all.map(norm));
+            _bdState.redraw?.();
+        }
+    });
+}
 if (app.refreshCombo) {
     const _orig = app.refreshCombo.bind(app);
     app.refreshCombo = function (...args) {
-        _loraCache = null;
-        _previewVer += 1;
+        invalidateCache();
         return _orig(...args);
     };
 }
@@ -1306,6 +1326,21 @@ let _wm2View = (() => {
     catch (e) { return "grid"; }
 })();
 const CHECK_SVG = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 L6.5 12 L13 4"/></svg>`;
+// 弹窗记忆：上次选中的文件夹 + 目录树展开状态，全局一份（和视图记忆一样不按节点区分）
+const MEMO_KEY = "WindMix.loraModalMemo";
+let _memo = (() => {
+    try { return JSON.parse(localStorage.getItem(MEMO_KEY) || "{}") || {}; } catch (e) { return {}; }
+})();
+function saveMemo(dir, collapsed) {
+    _memo = { dir, collapsed: [...collapsed] };
+    try { localStorage.setItem(MEMO_KEY, JSON.stringify(_memo)); } catch (e) {}
+}
+function memoDir(all) {
+    const d = _memo.dir;
+    if (!d) return null;                                   // 没记忆 / 记忆是「全部」
+    if (!all.length) return d;                             // 列表还没到，先按记忆留着，别误报
+    return all.some((p) => { const x = dirOf(p); return x === d || x.startsWith(d + "/"); }) ? d : null;
+}
 function closeModal() {
     if (_bd) _bd.classList.remove("open");
     _bdState = null;
@@ -1322,9 +1357,30 @@ function openModal(node, gi, opts = {}) {
         _bd = b;
         return b;
     })();
-    _bdState = { node, gi, kw: "", dir: null, sel: new Set(), replace: repl, collapsed: new Set() };
+    const want = _memo.dir || null;
+    _bdState = {
+        node, gi, kw: "", dir: memoDir(node.__wm2All || []), sel: new Set(), replace: repl,
+        collapsed: new Set(Array.isArray(_memo.collapsed) ? _memo.collapsed : []),
+    };
     bd.innerHTML = "";
     bd.classList.add("open");
+    _bdState.redraw = () => { renderSide(); renderBody(); };
+    // 弹窗每次打开实拉一次列表：新丢进 models/Lora 的模型不用先按 R 就能选到
+    getLoraFiles(true).then((all) => {
+        node.__wm2All = all;
+        node.__wm2Known = new Set(all.map(norm));
+        if (node.__wm2Built) renderRows(node, true);
+        if (_bdState?.node !== node) return;
+        const d = all.length ? memoDir(all) : null;
+        if (want && all.length && d === null) {
+            // 记忆里的文件夹没了：说一句并把记忆清掉，免得每次都提示
+            saveMemo(null, _bdState.collapsed);
+            warn(node, `记忆的文件夹「${want}」已不存在，回到「全部」`);
+        }
+        _bdState.dir = d;
+        renderSide();
+        renderBody();
+    });
 
     const m = document.createElement("div");
     m.className = "wm2-modal";
@@ -1460,6 +1516,7 @@ function openModal(node, gi, opts = {}) {
                     e.stopPropagation();
                     if (_bdState.collapsed.has(key)) _bdState.collapsed.delete(key);
                     else _bdState.collapsed.add(key);
+                    saveMemo(_bdState.dir, _bdState.collapsed);
                     renderSide();
                 };
                 it.append(ch);
@@ -1473,7 +1530,7 @@ function openModal(node, gi, opts = {}) {
             c.className = "n";
             c.textContent = n;
             it.append(s, c);
-            it.onclick = () => { _bdState.dir = dir; renderSide(); renderBody(); };
+            it.onclick = () => { _bdState.dir = dir; saveMemo(dir, _bdState.collapsed); renderSide(); renderBody(); };
             side.append(it);
         };
         row("全部", null, all, 0, false, "");
@@ -2143,5 +2200,9 @@ app.registerExtension({
     },
     setup() {
         injectStyle();
+    },
+    // 前端在 refreshComboInNodes() 里统一 invoke 这个钩子（R / 顶栏刷新都走它）
+    refreshComboInNodes() {
+        return refreshAllNodes();
     },
 });

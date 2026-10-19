@@ -63,12 +63,23 @@ async def windmix_loras(request):
 @PromptServer.instance.routes.get("/windmix/unets")
 async def windmix_unets(request):
     """返回 diffusion_models 目录下的全部 DiT/UNet 模型相对路径列表（含子目录），
-    供 UNet2 XY 输入节点的选择器/文件夹树使用。"""
+    供 📊 XY 输入: UNet（WindMixUNetXY）的选择器/文件夹树使用。"""
     try:
         unets = folder_paths.get_filename_list("diffusion_models")
     except Exception:
         unets = []
     return web.json_response({"unets": unets or []})
+
+
+@PromptServer.instance.routes.get("/windmix/checkpoints")
+async def windmix_checkpoints(request):
+    """返回 checkpoints 目录下的全部底模相对路径列表（含子目录），
+    供 📊 XY 输入: Checkpoint 节点的选择器/文件夹树使用（与 /windmix/unets 同一套前端界面）。"""
+    try:
+        ckpts = folder_paths.get_filename_list("checkpoints")
+    except Exception:
+        ckpts = []
+    return web.json_response({"checkpoints": ckpts or []})
 
 
 # ============================== 预设文本管理器 ==============================

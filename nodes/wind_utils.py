@@ -197,24 +197,33 @@ def print_loaded_objects_entries(id=None, prompt=None, show_id=False):
             continue
         entries_found = True
         print(f"{key.capitalize()}:")
-        for i, entry in enumerate(entries_with_id, 1):  # Start numbering from 1
-            if key == "lora":
-                base_ckpt_name = os.path.splitext(os.path.basename(entry[1]))[0]  # Split logic for base_ckpt
-                if id is None:
-                    associated_ids = ', '.join(map(str, entry[-1]))  # Gather all associated ids
-                    print(f"  [{i}] base_ckpt: {base_ckpt_name} (ids: {associated_ids})")
+        try:
+            for i, entry in enumerate(entries_with_id, 1):  # Start numbering from 1
+                if key == "lora":
+                    base_ckpt_name = os.path.splitext(os.path.basename(entry[1]))[0]  # Split logic for base_ckpt
+                    if id is None:
+                        associated_ids = ', '.join(map(str, entry[-1]))  # Gather all associated ids
+                        print(f"  [{i}] base_ckpt: {base_ckpt_name} (ids: {associated_ids})")
+                    else:
+                        print(f"  [{i}] base_ckpt: {base_ckpt_name}")
+                    for lora_tup in entry[0]:
+                        # WindMix: LoRA 条目按上游契约是三元组，但 📊 XY 输入: LoRA 会多带
+                        # 第四位触发词 tag（加载路径同样按 [:3] 容错，见下方 load_lora / define_model）。
+                        name, strength_model, strength_clip = lora_tup[:3]
+                        lora_model_info = f"{os.path.splitext(os.path.basename(name))[0]}({round(strength_model, 2)},{round(strength_clip, 2)})"
+                        print(f"      lora(mod,clip): {lora_model_info}")
                 else:
-                    print(f"  [{i}] base_ckpt: {base_ckpt_name}")
-                for name, strength_model, strength_clip in entry[0]:
-                    lora_model_info = f"{os.path.splitext(os.path.basename(name))[0]}({round(strength_model, 2)},{round(strength_clip, 2)})"
-                    print(f"      lora(mod,clip): {lora_model_info}")
-            else:
-                name_without_ext = os.path.splitext(os.path.basename(entry[0]))[0]
-                if id is None:
-                    associated_ids = ', '.join(map(str, entry[-1]))  # Gather all associated ids
-                    print(f"  [{i}] {name_without_ext} (ids: {associated_ids})")
-                else:
-                    print(f"  [{i}] {name_without_ext}")
+                    name_without_ext = os.path.splitext(os.path.basename(entry[0]))[0]
+                    if id is None:
+                        associated_ids = ', '.join(map(str, entry[-1]))  # Gather all associated ids
+                        print(f"  [{i}] {name_without_ext} (ids: {associated_ids})")
+                    else:
+                        print(f"  [{i}] {name_without_ext}")
+        except Exception as e:
+            # 这段只是调试用的缓存清单，它没有资格废掉已经跑完的结果——
+            # XY 网格更是在全部格子生成、拼接完之后才走到这里打印（KSampler 收尾），
+            # 以前这里抛异常会把整张网格连同已完成的采样一起吞掉。只警告，不向上抛。
+            print(f"\033[33m[WindMix] 模型缓存清单的 {key} 段打印失败，已跳过: {type(e).__name__}: {e}\033[0m")
     if not entries_found:
         print("-")
 
@@ -385,6 +394,15 @@ def load_lora(lora_params, ckpt_name, id, cache=None, ckpt_cache=None, cache_ove
             return ckpt, clip
 
         lora_name, strength_model, strength_clip = lora_params[0][:3]
+
+        # 「无 LoRA 基线」项（⚡ XY 输入: LoRA 的 include_none 会产出 ("None", 强度, 1.0, tag)）。
+        # 这类条目跳过加载、保留当前 ckpt/clip 继续递归，语义与 DiT 分支里的
+        # `if lora_name != "None"` 守卫一致；否则 get_full_path("loras", "None") 返回 None，
+        # 下面 load_torch_file(None) 直接抛 "Error loading Lora file: None"。
+        if not lora_name or lora_name == "None":
+            return recursive_load_lora(lora_params[1:], ckpt, clip, id, ckpt_cache,
+                                       cache_overwrite, folder_paths)
+
         if os.path.isabs(lora_name):
             lora_path = lora_name
         else:
@@ -405,7 +423,10 @@ def load_lora(lora_params, ckpt_name, id, cache=None, ckpt_cache=None, cache_ove
         return recursive_load_lora(lora_params[1:], lora_model, lora_clip, id, ckpt_cache, cache_overwrite, folder_paths)
 
     # Unpack lora parameters from the first element of the list for now
-    lora_name, strength_model, strength_clip = lora_params[0]
+    # [:3] 而不是直接解包：XY 的 LoRA 轴格子是 4 元组 (name, model_str, clip_str, tag)
+    # （tag 由 define_model 拼进正提），死板的 3 元解包会 "too many values to unpack"；
+    # 3 元组（LoRA Stack / 加载器自己的 lora_params）走 [:3] 是恒等变换，行为不变。
+    lora_name, strength_model, strength_clip = lora_params[0][:3]
     ckpt, clip, _ = load_checkpoint(ckpt_name, id, cache=ckpt_cache)
 
     lora_model, lora_clip = recursive_load_lora(lora_params, ckpt, clip, id, ckpt_cache, cache_overwrite, folder_paths)

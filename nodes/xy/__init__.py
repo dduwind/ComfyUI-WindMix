@@ -1,8 +1,13 @@
 # WindMix: XY subsystem package.
 #
 # Holds all "XY Plot" related nodes:
-#   - xy_plot_nodes.py : ⚡ XY Plot + ⚡ XY Input: LoRA / LoRA Plot / Model (DiT/UNet)
-#                         (moved here from wind_efficiency_nodes.py)
+#   - xy_plot_nodes.py : ⚡ XY Plot + ⚡ XY Input: LoRA Plot
+#                       (moved here from wind_efficiency_nodes.py)
+#   NOTE: the old "⚡ XY Input: LoRA" node was removed; "📊 XY 输入: LoRA" is now
+#         WindMixLoraXY (nodes/windmix_xy_inputs.py), which emits the same XY tuple.
+#   NOTE: the old "⚡ XY Input: UNet Model" node was removed too — its DiT Model axis
+#         is covered by "📊 XY 输入: UNet" (WindMixUNetXY); the object-direct
+#         UNet2 (WindMixUNet3XY) and Checkpoint inputs also live in nodes/windmix_xy_inputs.py.
 #
 
 # NOTE: The standalone "⚡ XY 图表拼接" node was removed. The ⚡ KSampler

@@ -1,14 +1,16 @@
 # ComfyUI-WindMix — 新版 XY 输入节点（沿用 LoRA Stack 的 DOM 行 UI 交互）
 #
-#   - WindMixLoraXY  ：⚡ XY 输入: LoRA2
+#   - WindMixLoraXY  ：⚡ XY 输入: LoRA
 #       界面复用 web/windmix_lora_manager.js 的 LoRA 卡片 UI（顶部搜索框输入即出候选、
 #       回车添加，底部 Add LoRA / 新建配方 走浏览弹窗，弹窗左栏按文件夹筛；
 #       逐行[开关/名称/强度/tag/删除]，tag 从模型元数据自动填），数据落在隐藏的 `lora_data` 控件。
 #       输出单个 XY 引脚（x_or_y），接到 ⚡ XY Plot 的 X 或 Y 输入。
-#       每个启用行 = X/Y 轴上的一个格子，单元格内只加载该行那一个 LoRA（沿用原
-#       ⚡ XY Input: LoRA 行为）。可选「无 LoRA 基线」开关（默认开）。
+#       每个启用行 = X/Y 轴上的一个格子，单元格内只加载该行那一个 LoRA。
+#       可选「无 LoRA 基线」开关（默认开）。
+#       （老版 ⚡ XY Input: LoRA / lora_name_i 定长控件节点已删除，显示名由本节点接管；
+#        注册键仍是 WindMixLoraXY，历史工作流不受影响。）
 #
-#   - WindMixUNetXY  ：⚡ XY 输入: UNet2
+#   - WindMixUNetXY  ：📊 XY 输入: UNet
 #       界面在 web/windmix_xy_unet_manager.js（仅 Model Names 模式），与 LoRA 卡片同一套
 #       配色/按钮：样式、图标、提示条、节点底距几何引擎都直接 import windmix_lora_manager.js
 #       的共用件。搜索即添加 + Add 模型 浏览弹窗（左栏按文件夹筛、可多选）+
@@ -16,6 +18,14 @@
 #       数据落在隐藏的 `unet_data` 控件，格式 [{on,name}, ...]（与旧版兼容）。
 #       输出单个 XY 引脚（x_or_y），接到 ⚡ XY Plot 的 X 或 Y 输入。
 #       每个启用行 = 一个格子，单元格 = (unet_name, None, None)。
+#
+#   - WindMixCkptXY  ：⚡ XY 输入: Checkpoint
+#       与 UNet 同一个前端（web/windmix_xy_unet_manager.js 按节点类型配置数据源），
+#       行是[手柄/开关/名称/删除]、可多选浏览弹窗，数据落在隐藏的 `ckpt_data` 控件。
+#       输出 ("Checkpoint", [(ckpt名, None, None), ...])——对齐上游 Efficiency Nodes
+#       的 XY Input: Checkpoint 契约；clip_skip/vae 留 None 表示沿用效率加载器的值。
+#       （老版 ⚡ XY Input: UNet Model 已从 xy_plot_nodes.py 删除，它的 DiT Model 轴
+#        功能由 UNet 覆盖，这个名字腾出来给了 Checkpoint。）
 #
 # 持久化：两个节点各用一个隐藏 STRING 控件存放 JSON（前端负责读写），ComfyUI 自动序列化。
 # 后端只负责解析该 JSON 并产出 XY 元组，格式与 wind_efficiency_nodes.py 的 define_model 对齐：
@@ -30,7 +40,7 @@ import json
 from .windmix_lora_nodes import _parse_stack
 
 MAX_ROWS = 50
-# UNet3 动态外部接口的上限（与合并文本一致）：model1..model20
+# WindMixUNet3XY（显示名 📊 XY 输入: UNet2）动态外部接口的上限（与合并文本一致）：model1..model20
 MAX_UNET3_MODELS = 20
 
 
@@ -92,7 +102,7 @@ class WindMixUNetXY:
 class WindMixUNet3XY:
     """XY 输入：UNet / DiT 模型（外部连线动态接口版 · MODEL 对象直连）。
 
-    与 UNet2 同属 "DiT Model" 轴，但模型不从本地下拉选、而是从外部 MODEL 接口接入：
+    与 UNet 同属 "DiT Model" 轴，但模型不从本地下拉选、而是从外部 MODEL 接口接入：
     每个 model1..modelN 接一个已加载的模型（UNETLoader 输出，或模型融合节点输出的
     融合模型——没有本地文件名的那种）。前端（web/windmix_xy_unet3.js）负责动态接口：
     初始只留 model1，接上 modelN 自动追加 modelN+1，断开后清理多余空接口。
@@ -126,14 +136,52 @@ class WindMixUNet3XY:
         return (("DiT Model", cells),) if cells else (None,)
 
 
+class WindMixCkptXY:
+    """XY 输入：Checkpoint 底模（新卡片 UI，与 UNet 同一个前端）。每行 = 一个 X/Y 格子。
+
+    对齐上游 Efficiency Nodes 的 XY Input: Checkpoint 契约：
+        ("Checkpoint", [(ckpt_name, clip_skip, vae_name), ...])
+    本节点只填第一项，后两位给 None —— define_variable 的 Checkpoint 分支遇到 None 会沿用
+    ⚡/🚀 效率加载器的 clip_skip / vae（上游同款语义）。要逐格换 VAE / ClipSkip 的话，
+    用现成的 VAE 轴、Clip Skip 轴或「XY 输入: 手动」与 Checkpoint 轴组成网格即可。
+
+    采样器端不需要新增任何东西：Checkpoint 在 priority 列表里排第一，XY Plot 会把它翻到 X 轴
+    （列），define_model 只在 index==0（每列首格）载一次 ckpt，encode=True 重新编码提示词。
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                # 隐藏控件，前端用 DOM 行 UI 管理，这里只负责持久化 JSON：[{on,name}, ...]
+                "ckpt_data": ("STRING", {"multiline": True, "default": "[]"}),
+            }
+        }
+
+    RETURN_TYPES = ("XY",)
+    RETURN_NAMES = ("x_or_y",)
+    FUNCTION = "xy_value"
+    CATEGORY = "⚡ WindMix/📊 xy图表"
+
+    def xy_value(self, ckpt_data):
+        entries = _parse_stack(ckpt_data)
+        # 只取启用行；每行 = 一个格子：(ckpt_name, clip_skip=None, vae=None)
+        cells = [(e["name"], None, None) for e in entries if e.get("on", True)]
+        return (("Checkpoint", cells),) if cells else (None,)
+
+
 NODE_CLASS_MAPPINGS = {
     "WindMixLoraXY": WindMixLoraXY,
     "WindMixUNetXY": WindMixUNetXY,
     "WindMixUNet3XY": WindMixUNet3XY,
+    "WindMixCkptXY": WindMixCkptXY,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "WindMixLoraXY": "📊 XY 输入: LoRA2",
-    "WindMixUNetXY": "📊 XY 输入: UNet2",
-    "WindMixUNet3XY": "📊 XY 输入: UNet3",
+    # 只改显示名，注册键（WindMixUNetXY / WindMixUNet3XY）不动 → 历史工作流照旧加载。
+    # 2026-10-19 起：UNet2→UNet（按本地文件名换轴），UNet3→UNet2（外部 MODEL 对象接入）。
+    "WindMixLoraXY": "📊 XY 输入: LoRA",
+    "WindMixUNetXY": "📊 XY 输入: UNet",
+    "WindMixUNet3XY": "📊 XY 输入: UNet2",
+    "WindMixCkptXY": "📊 XY 输入: Checkpoint",
 }

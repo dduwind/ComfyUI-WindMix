@@ -1,7 +1,7 @@
 import { app } from "/scripts/app.js";
 
 // =============================================================================
-// UNet2（📊 XY 输入: UNet2 · WindMixUNetXY）的界面
+// UNet（📊 XY 输入: UNet · WindMixUNetXY）的界面
 // 和 LoRA 卡片同一套设计：搜索即添加 + 固定高度内滚动列表 + 浏览弹窗，
 // 样式 / 图标 / 提示条 / 底距几何引擎都直接 import windmix_lora_manager.js 的共用件，
 // DOM 全部用 wm2-* 类，节点尺寸字段沿用 node.__wm2*（引擎按这套名字读缓存）。
@@ -15,8 +15,33 @@ import {
     UI_H, MIN_NODE_W, MAX_ROWS, PV_W, PV_H,
 } from "./windmix_lora_manager.js";
 
-const NODE_TYPES = ["WindMixUNetXY"];
-const DATA_WIDGET = "unet_data";
+const NODE_TYPES = ["WindMixUNetXY", "WindMixCkptXY"];
+
+// 一套界面、两种节点：模型库来源 / 隐藏控件 / 预览 type / 视图与文件夹记忆的 localStorage 键
+// 全部按「节点类型」查这张表。UNet 那份的值和改造前完全一样，行为不变；
+// Checkpoint 只是把数据源换成 folder_paths 的 checkpoints（后端 /windmix/checkpoints）。
+const TYPE_CONF = {
+    WindMixUNetXY: {
+        widget: "unet_data",
+        url: "/windmix/unets",
+        listKey: "unets",
+        previewType: "diffusion_models",
+        viewKey: "WindMix.unetModalView",
+        memoKey: "WindMix.unetModalMemo",
+        label: "模型",
+    },
+    WindMixCkptXY: {
+        widget: "ckpt_data",
+        url: "/windmix/checkpoints",
+        listKey: "checkpoints",
+        previewType: "checkpoints",
+        viewKey: "WindMix.ckptModalView",
+        memoKey: "WindMix.ckptModalMemo",
+        label: "底模",
+    },
+};
+// 取节点所属配置（未知类型退回 UNet，保证老数据不炸）
+const conf = (nodeOrType) => TYPE_CONF[(typeof nodeOrType === "string" ? nodeOrType : nodeOrType?.type)] || TYPE_CONF.WindMixUNetXY;
 
 // 模型比 LoRA 多几种后缀，显示时都当成「扩展名」削掉
 const MODEL_EXT = /\.(safetensors|ckpt|pt|bin|pth|gguf|onnx)$/i;
@@ -27,33 +52,58 @@ const nameOf = (p) => stemOf(baseOf(p || ""));
 //==============================================================================
 // 数据源（/windmix/unets = folder_paths 的 diffusion_models）
 //==============================================================================
-let _allCache = null;
+// 列表按「节点类型」各缓一份（UNet 与 Checkpoint 是两个不同的目录）
+const _allCache = {};
 let _previewVer = 0;
-async function getModelFiles(force = false) {
-    if (_allCache == null || force) {
+async function getModelFiles(nodeOrType, force = false) {
+    const c = conf(nodeOrType);
+    if (_allCache[c.url] == null || force) {
         try {
-            const r = await fetch("/windmix/unets");
+            const r = await fetch(c.url);
             const j = await r.json();
-            _allCache = Array.isArray(j.unets) ? j.unets : [];
+            _allCache[c.url] = Array.isArray(j[c.listKey]) ? j[c.listKey] : [];
         } catch (e) {
-            _allCache = [];
+            _allCache[c.url] = [];
         }
     }
-    return _allCache || [];
+    return _allCache[c.url] || [];
 }
 
+// 同 LoRA 侧：R 刷新走官方扩展钩子 refreshComboInNodes（见文件末尾），这个补丁只兜老前端
+function invalidateCache() {
+    Object.keys(_allCache).forEach((k) => delete _allCache[k]);
+    _previewVer += 1;   // 同名模型被替换后预览图也要跟着换
+}
+function refreshAllNodes() {
+    invalidateCache();
+    // 两种数据源都实拉一次，再按节点类型分发
+    return Promise.all(Object.keys(TYPE_CONF).map((t) => getModelFiles(t, true))).then(() => {
+        (app.graph?._nodes || []).forEach((n) => {
+            if (n && NODE_TYPES.includes(n.type) && n.__xyBuilt) refreshKnown(n);
+        });
+        // 刷新时弹窗正开着：直接把它的数据换掉并重画
+        if (_bdState?.node) {
+            const node = _bdState.node;
+            return getModelFiles(node, true).then((all) => {
+                if (_bdState?.node !== node) return;
+                node.__xyAll = all;
+                node.__xyKnown = new Set(all.map(norm));
+                _bdState.redraw?.();
+            });
+        }
+    });
+}
 if (app.refreshCombo) {
     const _orig = app.refreshCombo.bind(app);
     app.refreshCombo = function (...args) {
-        _allCache = null;
-        _previewVer += 1;
+        invalidateCache();
         return _orig(...args);
     };
 }
 
-// 预览图同样只认「模型同目录同名图片」，走 WindMix 自己的路由
-function previewUrl(name) {
-    return `/WM_studio/prompt-studio/model-preview?type=diffusion_models` +
+// 预览图同样只认「模型同目录同名图片」，走 WindMix 自己的路由（type = folder_paths 的目录键）
+function previewUrl(name, ptype = "diffusion_models") {
+    return `/WM_studio/prompt-studio/model-preview?type=${encodeURIComponent(ptype)}` +
         `&name=${encodeURIComponent(name)}&v=${_previewVer}`;
 }
 
@@ -61,7 +111,8 @@ function previewUrl(name) {
 // 数据读写
 //==============================================================================
 function getDataWidget(node) {
-    return (node.widgets || []).find((w) => w.name === DATA_WIDGET);
+    const name = conf(node).widget;
+    return (node.widgets || []).find((w) => w.name === name);
 }
 
 function loadStack(node) {
@@ -199,7 +250,7 @@ function renderAc(node) {
             </div>`;
         });
     });
-    if (!_acItems.length) html = `<div class="none">${node.__xyKw ? "无匹配结果（已添加的不再出现）" : "库里没有可选的模型"}</div>`;
+    if (!_acItems.length) html = `<div class="none">${node.__xyKw ? "无匹配结果（已添加的不再出现）" : `库里没有可选的${conf(node).label}`}</div>`;
     else html += `<div class="foot"><span>↑↓ 选择</span><span>Enter 添加</span><span>Esc 收起</span><span style="margin-left:auto">最多 20 条</span></div>`;
     ac.innerHTML = html;
     positionAc();
@@ -247,7 +298,7 @@ function positionPv(anchor) {
     pv.style.left = left + "px";
     pv.style.top = Math.max(8, Math.min(r.top - 10, window.innerHeight - PV_H - 8)) + "px";
 }
-function showPv(name, anchor) {
+function showPv(name, anchor, ptype) {
     if (!name || !anchor?.getBoundingClientRect) return;
     const token = ++_pvToken;
     const box = document.createElement("img");
@@ -260,7 +311,7 @@ function showPv(name, anchor) {
         _pv.classList.add("open");
     };
     box.onerror = () => { if (token === _pvToken) hidePv(); };
-    box.src = previewUrl(name);
+    box.src = previewUrl(name, ptype);
 }
 function hidePv() {
     clearTimeout(_pvTimer);
@@ -268,11 +319,11 @@ function hidePv() {
     if (_pv) _pv.classList.remove("open");
 }
 // 悬停延时：行 400ms，弹窗条目 300ms（和 LoRA 卡片一致）
-function hoverPv(name, anchor, delay) {
+function hoverPv(name, anchor, delay, ptype) {
     anchor.addEventListener("mouseenter", () => {
         if (!name) return;
         clearTimeout(_pvTimer);
-        _pvTimer = setTimeout(() => showPv(name, anchor), delay);
+        _pvTimer = setTimeout(() => showPv(name, anchor, ptype), delay);
     });
     anchor.addEventListener("mouseleave", hidePv);
 }
@@ -349,13 +400,13 @@ function makeRow(node, entry) {
     name.append(stemSpan);
     const ext = extOf(entry.name || "");
     if (ext) { const s = document.createElement("span"); s.className = "ext"; s.textContent = ext; name.append(s); }
-    name.title = (entry.name || "未选择模型") + "\n点击重新选择其他模型";
+    name.title = (entry.name || `未选择${conf(node).label}`) + `\n点击重新选择其他${conf(node).label}`;
     name.onclick = (e) => {
         e.stopPropagation();
         node.__xySel = norm(entry.name);
         openModal(node, { replace: entry });
     };
-    hoverPv(entry.name, name, 400);
+    hoverPv(entry.name, name, 400, conf(node).previewType);
     row.append(name);
 
     const del = document.createElement("button");
@@ -448,14 +499,14 @@ function renderRows(node, keepScroll) {
 
     const sl = document.createElement("span");
     sl.className = "slabel";
-    sl.innerHTML = `模型<span class="hint">点名称重选 · 拖手柄排序</span>`;
+    sl.innerHTML = `${conf(node).label}<span class="hint">点名称重选 · 拖手柄排序</span>`;
     head.append(sl);
     list.append(head);
 
     if (!all.length) {
         const e = document.createElement("div");
         e.className = "wm2-empty";
-        e.innerHTML = `还没有模型<br>上方<b>搜索框</b>输入关键词回车，或点下方<b>Add 模型</b> 浏览全部`;
+        e.innerHTML = `还没有${conf(node).label}<br>上方<b>搜索框</b>输入关键词回车，或点下方<b>Add ${conf(node).label}</b> 浏览全部`;
         list.append(e);
     }
     all.forEach((entry) => list.append(makeRow(node, entry)));
@@ -464,9 +515,30 @@ function renderRows(node, keepScroll) {
 }
 
 //==============================================================================
-// 浏览弹窗（多选添加 / 单选替换 + 文件夹侧栏），结构与 LoRA 的弹窗共用同一批样式
+// 浏览弹窗：与 LoRA 弹窗同一套交互（列表/缩略图双视图 + 层级目录树 + 文件夹记忆），
+// 样式全部走 wm2-* 共用件，只是数据源和「已添加」判重按 UNet 的扁平列表算
 //==============================================================================
 let _bd = null, _bdState = null;
+// 视图 + 文件夹记忆：与 LoRA 弹窗同一套行为；UNet 和 Checkpoint 各记各的一份
+// （键在 TYPE_CONF.viewKey / memoKey）。弹窗是单实例，打开时按所属节点把那一份读进来，
+// 之后读写都走 _viewKey / _memoKey 这两个「当前弹窗所属」的键。
+let _uv = "grid";
+let _viewKey = TYPE_CONF.WindMixUNetXY.viewKey;
+let _memoKey = TYPE_CONF.WindMixUNetXY.memoKey;
+const CHECK_SVG = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 L6.5 12 L13 4"/></svg>`;
+const readView = (k) => { try { return localStorage.getItem(k) === "list" ? "list" : "grid"; } catch (e) { return "grid"; } };
+const readMemo = (k) => { try { return JSON.parse(localStorage.getItem(k) || "{}") || {}; } catch (e) { return {}; } };
+let _memo = {};
+function saveMemo(dir, collapsed) {
+    _memo = { dir, collapsed: [...collapsed] };
+    try { localStorage.setItem(_memoKey, JSON.stringify(_memo)); } catch (e) {}
+}
+function memoDir(all) {
+    const d = _memo.dir;
+    if (!d) return null;                       // 没记忆 / 记忆是「全部」
+    if (!all.length) return d;                 // 列表还没到，先按记忆留着，别误报
+    return all.some((p) => { const x = dirOf(p); return x === d || x.startsWith(d + "/"); }) ? d : null;
+}
 function closeModal() {
     if (_bd) _bd.classList.remove("open");
     _bdState = null;
@@ -475,28 +547,69 @@ function closeModal() {
 function openModal(node, opts = {}) {
     injectStyle();
     const repl = opts.replace || null;
+    const tconf = conf(node);
+    // 换到本节点所属的那份视图/文件夹记忆
+    _viewKey = tconf.viewKey;
+    _memoKey = tconf.memoKey;
+    _uv = readView(_viewKey);
+    _memo = readMemo(_memoKey);
+    const LBL = tconf.label;   // 弹窗里的文案按节点类型说「模型」还是「底模」
     _bd = _bd && _bd.isConnected ? _bd : (() => {
         const b = document.createElement("div");
         b.className = "wm2-bd";
         document.body.append(b);
         return b;
     })();
-    _bdState = { node, kw: "", dir: null, sel: new Set(), replace: repl };
+    const want = _memo.dir || null;
+    _bdState = {
+        node, kw: "", dir: memoDir(node.__xyAll || []), sel: new Set(), replace: repl,
+        collapsed: new Set(Array.isArray(_memo.collapsed) ? _memo.collapsed : []),
+    };
     const bd = _bd;
     bd.innerHTML = "";
     bd.classList.add("open");
+    _bdState.redraw = () => { renderSide(); renderBody(); };
+    // 弹窗每次打开实拉一次列表：新丢进模型目录的不用先按 R 就能选到（按节点类型取对应目录）
+    getModelFiles(node, true).then((all) => {
+        node.__xyAll = all;
+        node.__xyKnown = new Set(all.map(norm));
+        if (node.__xyBuilt) renderRows(node, true);
+        if (_bdState?.node !== node) return;
+        const d = all.length ? memoDir(all) : null;
+        if (want && all.length && d === null) {
+            // 记忆里的文件夹没了：说一句并把记忆清掉，免得每次都提示
+            saveMemo(null, _bdState.collapsed);
+            warn(node, `记忆的文件夹「${want}」已不存在，回到「全部」`);
+        }
+        _bdState.dir = d;
+        renderSide();
+        renderBody();
+    });
 
     const m = document.createElement("div");
     m.className = "wm2-modal";
     bd.append(m);
 
     const h = document.createElement("h4");
-    h.textContent = repl ? `重新选择模型 · ${nameOf(repl.name)}` : "Add 模型";
+    h.textContent = repl ? `重新选择${LBL} · ${nameOf(repl.name)}` : `Add ${LBL}`;
+    // 视图切换：列表 ⇄ 缩略图网格（选择记在 localStorage，下次打开保持）
+    const vsw = document.createElement("span");
+    vsw.className = "wm2-vsw";
+    const bList = document.createElement("button");
+    bList.type = "button";
+    bList.title = "列表视图";
+    bList.innerHTML = `<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="2.5" width="14" height="2" rx="1"/><rect x="1" y="7" width="14" height="2" rx="1"/><rect x="1" y="11.5" width="14" height="2" rx="1"/></svg>`;
+    const bGrid = document.createElement("button");
+    bGrid.type = "button";
+    bGrid.title = "缩略图视图";
+    bGrid.innerHTML = `<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6.2" height="6.2" rx="1.4"/><rect x="8.8" y="1" width="6.2" height="6.2" rx="1.4"/><rect x="1" y="8.8" width="6.2" height="6.2" rx="1.4"/><rect x="8.8" y="8.8" width="6.2" height="6.2" rx="1.4"/></svg>`;
+    vsw.append(bList, bGrid);
     const x = document.createElement("span");
     x.className = "x";
     x.textContent = "✕";
+    x.style.marginLeft = "0";   // 右侧空间交给 vsw 的 margin-left:auto
     x.onclick = () => closeModal();
-    h.append(x);
+    h.append(vsw, x);
     m.append(h);
 
     const searchWrap = document.createElement("div");
@@ -504,9 +617,9 @@ function openModal(node, opts = {}) {
     searchWrap.innerHTML = IC.mag;
     const kw = document.createElement("input");
     kw.type = "text";
-    kw.placeholder = "搜索模型名称 / 文件夹…";
+    kw.placeholder = `搜索${LBL}名称 / 文件夹…`;
     kw.onkeydown = (e) => e.stopPropagation();
-    kw.oninput = () => { _bdState.kw = kw.value; renderSide(); renderList(); };
+    kw.oninput = () => { _bdState.kw = kw.value; renderSide(); renderBody(); };
     searchWrap.append(kw);
     m.append(searchWrap);
     setTimeout(() => kw.focus(), 0);
@@ -518,7 +631,15 @@ function openModal(node, opts = {}) {
     side.className = "wm2-mside";
     const list = document.createElement("div");
     list.className = "wm2-mlist";
-    body.append(side, list);
+    // 缩略图网格视图（与 LoRA 同款：信息行 + 卡片网格）
+    const gridWrap = document.createElement("div");
+    gridWrap.className = "wm2-mgrid";
+    const ginfo = document.createElement("div");
+    ginfo.className = "wm2-ginfo";
+    const grid = document.createElement("div");
+    grid.className = "wm2-grid";
+    gridWrap.append(ginfo, grid);
+    body.append(side, list, gridWrap);
 
     const foot = document.createElement("div");
     foot.className = "wm2-mfoot";
@@ -539,42 +660,85 @@ function openModal(node, opts = {}) {
         else {
             let added = 0;
             picks.forEach((p) => { if (addEntry(node, p)) added += 1; });
-            if (added) warn(node, `已添加 ${added} 个模型`);
+            if (added) warn(node, `已添加 ${added} 个${LBL}`);
         }
     };
     foot.append(cnt, sp, cancel, ok);
     m.append(foot);
 
-    const filtered = () => {
+    function kwFiltered() {
         const kw2 = _bdState.kw.trim().toLowerCase();
+        return (node.__xyAll || []).filter((p) => !kw2 ||
+            norm(p).toLowerCase().includes(kw2) || nameOf(p).toLowerCase().includes(kw2));
+    }
+    // 层级目录树：sd35 / sd35/flux 这类路径拆成父子节点，count 含所有子孙文件
+    function treeOf(paths) {
+        const root = { kids: new Map() };
+        for (const p of paths) {
+            const d = dirOf(p);
+            if (!d) continue;   // 根目录散文件只出现在「全部」里，不单独建节点
+            let n = root;
+            for (const seg of d.split("/")) {
+                if (!n.kids.has(seg)) n.kids.set(seg, { name: seg, path: (n.path ? n.path + "/" : "") + seg, kids: new Map(), count: 0 });
+                n = n.kids.get(seg);
+                n.count += 1;
+            }
+        }
+        return root;
+    }
+    function items() {
+        const used = usedPaths(node);
+        const hideUsed = !repl;                 // 已添加过的不再出现，替换模式除外
+        const kw2 = _bdState.kw.trim().toLowerCase();
+        const d = _bdState.dir;
         return (node.__xyAll || []).filter((p) => {
-            if (_bdState.dir !== null && (dirOf(p) || "根目录") !== _bdState.dir) return false;
+            if (d !== null) { const pd = dirOf(p); if (pd !== d && !pd.startsWith(d + "/")) return false; }
             if (kw2 && !norm(p).toLowerCase().includes(kw2) && !nameOf(p).toLowerCase().includes(kw2)) return false;
             return true;
-        }).filter((p) => repl || !usedPaths(node).has(norm(p)));   // 顶层已添加过的不再出现
-    };
+        }).filter((p) => !hideUsed || !used.has(norm(p)));
+    }
     function renderSide() {
         side.innerHTML = "";
-        const mk = (label, dir, n) => {
+        const all = (node.__xyAll || []).length;
+        const CHEV = `<svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 2.5 L8 6 L4 9.5"/></svg>`;
+        const row = (label, dir, n, depth, kids, key) => {
             const it = document.createElement("div");
             it.className = "f" + (_bdState.dir === dir ? " on" : "");
-            it.innerHTML = IC.folder;
+            it.style.paddingLeft = (9 + depth * 13) + "px";
+            if (kids) {
+                // 有子目录：箭头单独负责折叠/展开，点行其余部分仍是筛选
+                if (!_bdState.collapsed.has(key)) it.classList.add("open");
+                const ch = document.createElement("span");
+                ch.className = "chev";
+                ch.innerHTML = CHEV;
+                ch.onclick = (e) => {
+                    e.stopPropagation();
+                    if (_bdState.collapsed.has(key)) _bdState.collapsed.delete(key);
+                    else _bdState.collapsed.add(key);
+                    saveMemo(_bdState.dir, _bdState.collapsed);
+                    renderSide();
+                };
+                it.append(ch);
+            }
+            it.insertAdjacentHTML("beforeend", IC.folder);
             const s = document.createElement("span");
+            s.className = "lbl";
             s.textContent = label;
             const c = document.createElement("span");
             c.className = "n";
             c.textContent = n;
             it.append(s, c);
-            it.onclick = () => { _bdState.dir = dir; renderSide(); renderList(); };
+            it.onclick = () => { _bdState.dir = dir; saveMemo(dir, _bdState.collapsed); renderSide(); renderBody(); };
             side.append(it);
         };
-        const all = node.__xyAll || [];
-        mk("全部", null, all.length);
-        const m2 = new Map();
-        const kw2 = _bdState.kw.trim().toLowerCase();
-        all.filter((p) => !kw2 || norm(p).toLowerCase().includes(kw2))
-            .forEach((p) => { const d = dirOf(p) || "根目录"; m2.set(d, (m2.get(d) || 0) + 1); });
-        [...m2.entries()].sort((a, b) => a[0].localeCompare(b[0])).forEach(([d, n]) => mk(d, d, n));
+        row("全部", null, all, 0, false, "");
+        const walk = (map, depth) => {
+            [...map.values()].sort((a, b) => a.name.localeCompare(b.name)).forEach((nd) => {
+                row(nd.name, nd.path, nd.count, depth, nd.kids.size > 0, nd.path);
+                if (!_bdState.collapsed.has(nd.path)) walk(nd.kids, depth + 1);
+            });
+        };
+        walk(treeOf(kwFiltered()).kids, 0);
     }
     // 选中态只改 class，不重建列表（多选时每点一次都重排一次会闪）
     function refreshSelUI() {
@@ -584,18 +748,91 @@ function openModal(node, opts = {}) {
             const tg = it.querySelector(".wm2-tgl");
             if (tg) tg.className = on ? "wm2-tgl on" : "wm2-tgl";
         });
+        grid.querySelectorAll(".wm2-card").forEach((cd) => {
+            cd.classList.toggle("sel", _bdState.sel.has(cd.dataset.p));
+        });
         cnt.textContent = repl
-            ? (_bdState.sel.size ? `换成：${nameOf([..._bdState.sel][0])}` : "单选一个模型")
+            ? (_bdState.sel.size ? `换成：${nameOf([..._bdState.sel][0])}` : `单选一个${LBL}`)
             : `已选 ${_bdState.sel.size} 个 · 可多选`;
         ok.disabled = _bdState.sel.size === 0;
     }
-    function renderList() {
-        list.innerHTML = "";
-        const its = filtered();
+    // 角标：替换模式标出「当前」
+    function chipOf(p) {
+        return repl && norm(p) === norm(repl.name) ? "当前" : "";
+    }
+    // 两种视图共用的点选逻辑（网格卡片与列表条目行为完全一致）
+    function togglePick(p) {
+        if (repl) { _bdState.sel.clear(); _bdState.sel.add(p); }   // 单选
+        else if (_bdState.sel.has(p)) _bdState.sel.delete(p);
+        else _bdState.sel.add(p);
+        refreshSelUI();
+    }
+    function emptyText() {
+        return repl ? `没有可选的${LBL}` : `没有匹配的${LBL}（已添加过的不再出现）`;
+    }
+    // 缩略图网格：上图下名 + 右上角勾选圈；卡片自带预览图，不再挂悬停浮窗
+    function renderGrid() {
+        grid.innerHTML = "";
+        const its = items();
+        ginfo.innerHTML = "";
+        const b = document.createElement("b");
+        b.textContent = _bdState.dir === null ? "全部" : _bdState.dir;
+        ginfo.append(b, document.createTextNode(` · ${Math.min(its.length, 200)} 个${its.length > 200 ? "（仅显示前 200）" : ""}`));
         if (!its.length) {
             const e = document.createElement("div");
             e.className = "wm2-empty";
-            e.textContent = repl ? "没有可选的模型" : "没有匹配的模型（已添加过的不再出现）";
+            e.textContent = emptyText();
+            grid.append(e);
+            return;
+        }
+        its.slice(0, 200).forEach((p) => {
+            const on = _bdState.sel.has(p);
+            const cd = document.createElement("div");
+            cd.className = "wm2-card" + (on ? " sel" : "");
+            cd.dataset.p = p;
+            const im = document.createElement("div");
+            im.className = "im";
+            const abG = document.createTextNode(nameOf(p).slice(0, 2).toUpperCase());
+            im.append(abG);
+            const img = document.createElement("img");
+            img.loading = "lazy";
+            img.alt = "";
+            img.onerror = () => img.remove();
+            img.onload = () => abG.remove();   // 有图撤文字，无图留首字母兜底
+            img.src = previewUrl(p, conf(node).previewType);
+            im.append(img);
+            const cap = document.createElement("div");
+            cap.className = "cap";
+            const t = document.createElement("span");
+            t.className = "t";
+            t.textContent = nameOf(p);
+            t.title = p;
+            const d = document.createElement("span");
+            d.className = "d";
+            d.textContent = dirOf(p) || "根目录";
+            cap.append(t, d);
+            const chk = document.createElement("span");
+            chk.className = "chk";
+            chk.innerHTML = CHECK_SVG;
+            cd.append(im, cap, chk);
+            const chip = chipOf(p);
+            if (chip) {
+                const lab = document.createElement("span");
+                lab.className = "tagu";
+                lab.textContent = chip;
+                cd.append(lab);
+            }
+            cd.onclick = () => togglePick(p);
+            grid.append(cd);
+        });
+    }
+    function renderList() {
+        list.innerHTML = "";
+        const its = items();
+        if (!its.length) {
+            const e = document.createElement("div");
+            e.className = "wm2-empty";
+            e.textContent = emptyText();
             list.append(e);
         }
         its.slice(0, 200).forEach((p) => {
@@ -605,11 +842,13 @@ function openModal(node, opts = {}) {
             it.dataset.p = p;
             const th = document.createElement("span");
             th.className = "th";
-            th.textContent = nameOf(p).slice(0, 2).toUpperCase();
+            const abT = document.createTextNode(nameOf(p).slice(0, 2).toUpperCase());
+            th.append(abT);
             const im = document.createElement("img");
             im.loading = "lazy";
             im.onerror = () => im.remove();
-            im.src = previewUrl(p);
+            im.onload = () => abT.remove();   // 图加载成功就撤占位文字，图片满框
+            im.src = previewUrl(p, conf(node).previewType);
             th.append(im);
             const nm = document.createElement("span");
             nm.className = "nm";
@@ -622,26 +861,40 @@ function openModal(node, opts = {}) {
             const tg = document.createElement("span");
             tg.className = on ? "wm2-tgl on" : "wm2-tgl";
             it.append(th, nm);
-            if (repl && norm(p) === norm(repl.name)) {
+            const chip = chipOf(p);
+            if (chip) {
                 const lab = document.createElement("span");
                 lab.className = "tagu";
-                lab.textContent = "当前";
+                lab.textContent = chip;
                 it.append(lab);
             }
             it.append(tg);
-            it.onclick = () => {
-                if (repl) { _bdState.sel.clear(); _bdState.sel.add(p); }
-                else if (_bdState.sel.has(p)) _bdState.sel.delete(p);
-                else _bdState.sel.add(p);
-                refreshSelUI();
-            };
-            hoverPv(p, nm, 300);
+            it.onclick = () => togglePick(p);
+            hoverPv(p, nm, 300, conf(node).previewType);
             list.append(it);
         });
         refreshSelUI();
     }
+    // 按当前视图渲染对应一侧；切换时不重建，勾选集合两边共享
+    function renderBody() {
+        if (_uv === "grid") renderGrid();
+        else renderList();
+    }
+    function applyView() {
+        const g = _uv === "grid";
+        m.classList.toggle("wide", g);
+        // 网格：弹窗高度锁死 80vh，卡片固定 4 列，溢出交给网格内部滚动条；列表：按内容自适应
+        m.classList.toggle("gridmode", g);
+        list.style.display = g ? "none" : "";
+        gridWrap.style.display = g ? "" : "none";
+        bList.classList.toggle("on", !g);
+        bGrid.classList.toggle("on", g);
+        renderBody();
+    }
+    bList.onclick = () => { _uv = "list"; try { localStorage.setItem(_viewKey, "list"); } catch (e) {} applyView(); };
+    bGrid.onclick = () => { _uv = "grid"; try { localStorage.setItem(_viewKey, "grid"); } catch (e) {} applyView(); };
     renderSide();
-    renderList();
+    applyView();
 
     bd.onclick = (e) => { if (e.target === bd) closeModal(); };
 }
@@ -673,7 +926,7 @@ function buildUI(node) {
     mag.innerHTML = IC.mag;
     const input = document.createElement("input");
     input.type = "text";
-    input.placeholder = "搜索模型名称 / 文件夹… 回车添加";
+    input.placeholder = `搜索${conf(node).label}名称 / 文件夹… 回车添加`;
     input.spellcheck = false;
     const clr = document.createElement("button");
     clr.type = "button";
@@ -717,7 +970,7 @@ function buildUI(node) {
             e.preventDefault();
             const p = _acItems[_acIdx];
             if (p) pickAc(node, p);
-            else if (node.__xyKw.trim()) warn(node, `没找到「${node.__xyKw.trim()}」，换个关键词或用 Add 模型 浏览`);
+            else if (node.__xyKw.trim()) warn(node, `没找到「${node.__xyKw.trim()}」，换个关键词或用 Add ${conf(node).label} 浏览`);
         } else if (e.key === "Escape") { closeAc(); input.blur(); }
     });
     clr.onclick = (e) => { e.stopPropagation(); node.__xyKw = ""; input.value = ""; search.classList.remove("has-q"); input.focus(); };
@@ -783,7 +1036,7 @@ function buildUI(node) {
     const addBtn = document.createElement("button");
     addBtn.type = "button";
     addBtn.className = "wm2-addbtn";
-    addBtn.textContent = "＋ Add 模型";
+    addBtn.textContent = `＋ Add ${conf(node).label}`;
     addBtn.onclick = () => openModal(node, {});
     addrow.append(addBtn);
     c.append(addrow);
@@ -802,7 +1055,7 @@ function buildUI(node) {
 
 // 已知文件集合：用于「缺失即红」和候选列表
 function refreshKnown(node) {
-    return getModelFiles().then((all) => {
+    return getModelFiles(node).then((all) => {
         node.__xyAll = all;
         node.__xyKnown = new Set(all.map(norm));
         if (node.__xyBuilt) renderRows(node, true);
@@ -856,5 +1109,9 @@ app.registerExtension({
     },
     setup() {
         injectStyle();
+    },
+    // 前端在 refreshComboInNodes() 里统一 invoke 这个钩子（R / 顶栏刷新都走它）
+    refreshComboInNodes() {
+        return refreshAllNodes();
     },
 });

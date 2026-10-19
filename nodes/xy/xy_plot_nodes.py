@@ -623,59 +623,11 @@ class Wind_XYplot_LoRA_Batch:
 
 #=======================================================================================================================
 # WindMix XY Plot: LoRA Values
-# 简化版：固定「LoRA Names+Tags」风格，无模式切换。
-# 保留 lora_stack 可选输入；clip 控件全部移除（clip_str 固定 1.0）。
-class Wind_XYplot_LoRA:
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        loras = ["None"] + folder_paths.get_filename_list("loras")
-
-        inputs = {
-            "required": {
-                "lora_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM, "step": 1}),
-                "model_strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-            }
-        }
-
-        for i in range(1, XYPLOT_LIM+1):
-            inputs["required"][f"lora_name_{i}"] = (loras, {"default": "None"})
-            inputs["required"][f"model_str_{i}"] = ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01})
-            inputs["required"][f"tag_{i}"] = ("STRING", {"default": "", "multiline": False})
-
-        # include_none 放到 INPUT_TYPES 字典最末尾——视觉上落在所有 Python widget 之后、
-        # 紧挨 folder_btn（JS addWidget 默认末尾追加的按钮），无需 JS reorder。
-        # ⚠️ 历史教训：JS 端 splice/unshift 重排 node.widgets 会导致序列化索引错位。
-        inputs["required"]["include_none"] = ("BOOLEAN", {"default": True, "label": "添加无 LoRA 对比"})
-
-        inputs["optional"] = {
-            "lora_stack": ("LORA_STACK",)
-        }
-        return inputs
-
-    RETURN_TYPES = ("XY",)
-    RETURN_NAMES = ("x_or_y",)
-    FUNCTION = "xy_value"
-    CATEGORY = "⚡ WindMix/📊 xy图表"
-
-    def xy_value(self, lora_count, model_strength, include_none=True, lora_stack=None, **kwargs):
-        lora_stack = lora_stack if lora_stack else []
-
-        loras = [kwargs.get(f"lora_name_{i}") for i in range(1, lora_count + 1)]
-        model_strs = [kwargs.get(f"model_str_{i}", model_strength) for i in range(1, lora_count + 1)]
-        tags = [kwargs.get(f"tag_{i}", "") for i in range(1, lora_count + 1)]
-
-        # 4-tuple: (lora_name, model_str, clip_str, tag)。clip_str 固定 1.0（已移除 clip 控件）。
-        # 第 4 个元素 (tag) 由 define_model 拼到正向提示词。
-        items = [[(lora, model_str, 1.0, tag)] + lora_stack for lora, model_str, tag
-                 in zip(loras, model_strs, tags) if lora != "None"]
-
-        # 默认在第一格插入"无 LoRA"基线（include_none=True），便于与带 LoRA 的格子做对比；
-        # 仅在存在非 None LoRA 时才加，避免"只有 None 列表"这种无意义空格子。
-        if include_none and items:
-            items.insert(0, [("None", model_strength, 1.0, "")] + lora_stack)
-
-        return (("LoRA", items),)
+# 已删除：老版「⚡ XY Input: LoRA」（lora_count + lora_name_i 定长控件那套）。
+# 它的界面/持久化已被 ⚡ XY 输入: LoRA（nodes/windmix_xy_inputs.py 的 WindMixLoraXY，
+# 注册键不变，显示名接管了这个名字）完全覆盖：DOM 行 UI、搜索即添加、配方分组、tag 自动填。
+# 两者产出的 XY 元组格式一致（("LoRA", [[(name, model_str, clip_str, tag)], ...])），
+# 后端 define_model / load_lora 不需要区分来源。
 
 #=======================================================================================================================
 # WindMix XY Plot: LoRA Plot
@@ -1232,50 +1184,17 @@ class Wind_XYplot_JoinInputs:
         return ((xy_type, xy_value),)
 
 ########################################################################################################################
-# WindMix Image Overlay
-class Wind_XYplot_DiTModel:
-    @classmethod
-    def INPUT_TYPES(cls):
-        unets = ["None"] + folder_paths.get_filename_list("diffusion_models")
-        clips = ["None"] + folder_paths.get_filename_list("text_encoders")
-        vaes = ["None"] + folder_paths.get_filename_list("vae")
-        inputs = {"required": {
-            "input_mode": (["Model Names", "Model Names+Clip", "Model Names+Clip+VAE"],),
-            "model_count": ("INT", {"default": XYPLOT_DEF, "min": 0, "max": XYPLOT_LIM, "step": 1}),
-        }}
-        for i in range(1, XYPLOT_LIM + 1):
-            inputs["required"][f"unet_name_{i}"] = (unets,)
-            inputs["required"][f"clip_name_{i}"] = (clips,)
-            inputs["required"][f"vae_name_{i}"] = (vaes,)
-        return inputs
-
-    RETURN_TYPES = ("XY",)
-    RETURN_NAMES = ("x_or_y",)
-    FUNCTION = "xy_value"
-    CATEGORY = "⚡ WindMix/📊 xy图表"
-
-    def xy_value(self, input_mode, model_count, **kwargs):
-        xy_type = "DiT Model"
-        unets = [kwargs.get(f"unet_name_{i}") for i in range(1, model_count + 1)]
-        clips = [kwargs.get(f"clip_name_{i}") for i in range(1, model_count + 1)]
-        vaes = [kwargs.get(f"vae_name_{i}") for i in range(1, model_count + 1)]
-        for i in range(model_count):
-            if "Clip" not in input_mode:
-                clips[i] = None
-            if "VAE" not in input_mode:
-                vaes[i] = None
-        xy_value = [(u, c, v) for u, c, v in zip(unets, clips, vaes) if u != "None"]
-        return ((xy_type, xy_value),) if xy_value else (None,)
+# WindMix: ⚡ XY Input: UNet Model 已删除
+# 它是早期的「按名字换 DiT 模型」轴（model_count + unet_name_i/clip_name_i/vae_name_i 定长控件），
+# 功能完全被 📊 XY 输入: UNet（WindMixUNetXY，同样产出 ("DiT Model", cells)）覆盖；
+# 本文件腾出的这个名字位改成了 📊 XY 输入: Checkpoint（WindMixCkptXY，
+# 在 nodes/windmix_xy_inputs.py，界面复用 UNet 那套卡片行 UI）。
 
 NODE_CLASS_MAPPINGS = {
     "⚡ XY Plot": Wind_XYplot,
-    "⚡ XY Input: LoRA": Wind_XYplot_LoRA,
     "⚡ XY Input: LoRA Plot": Wind_XYplot_LoRA_Plot,
-    "⚡ XY Input: UNet Model": Wind_XYplot_DiTModel,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "⚡ XY Plot": "📊 XY 图表",
-    "⚡ XY Input: LoRA": "📊 XY 输入: LoRA",
     "⚡ XY Input: LoRA Plot": "📊 XY 输入: LoRA 图表",
-    "⚡ XY Input: UNet Model": "📊 XY 输入: UNet模型",
 }

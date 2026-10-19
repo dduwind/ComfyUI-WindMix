@@ -12,7 +12,7 @@
 
 面向 Anima / Z-Image / Krea-2 的 XY 测试工作流，用于批量测试 **LoRA** 与 **diffusion_models** 的不同组合。XY 结果可直接接入 `🧩 图像对比`，多张结果并排展示，效果差异一眼就能看出。
 
-`📊 XY 输入: LoRA2` 每一行 LoRA 都带一个 **tag 输入框**：选中 LoRA 时**自动填入触发词**，读的是 **LoRA Manager 的 metadata** —— 即 LoRA Manager 为每个 LoRA 生成的同名 `<LoRA名>.metadata.json`（取其 `civitai.trainedWords`），本插件不联网、只读这份文件。出图时该 tag **自动拼进正向提示词**，换轴对比不用再手工改提示词，每格都自带对应 LoRA 的触发词。
+`📊 XY 输入: LoRA` 每一行 LoRA 都带一个 **tag 输入框**：选中 LoRA 时**自动填入触发词**，读的是 **LoRA Manager 的 metadata** —— 即 LoRA Manager 为每个 LoRA 生成的同名 `<LoRA名>.metadata.json`（取其 `civitai.trainedWords`），本插件不联网、只读这份文件。出图时该 tag **自动拼进正向提示词**，换轴对比不用再手工改提示词，每格都自带对应 LoRA 的触发词。
 
 ### 3. 预设文本管理器 —— 提示词复用 + 批量出图
 
@@ -35,7 +35,7 @@
 - **标准输出**：输出 ComfyUI 原生 `LORA_STACK` + 汇总 `tags`，无缝接效率 / 采样节点；
 - **配方持久化**：整张表存在隐藏 `lora_data` JSON 里，随工作流一起保存，整组关闭即跳过。
 
-配套 `🎛️ LoRA Loader (Model Only)` 仅把这套 LoRA 打到 `MODEL`（不动 CLIP），`📊 XY 输入: LoRA2` 也复用同一套界面做换轴对比。
+配套 `🎛️ LoRA Loader (Model Only)` 仅把这套 LoRA 打到 `MODEL`（不动 CLIP），`📊 XY 输入: LoRA` 也复用同一套界面做换轴对比。
 
 ---
 
@@ -74,7 +74,7 @@ ComfyUI/
 ### 依赖
 
 - 核心节点只依赖 ComfyUI 自带能力，**无需额外 pip 包**。
-- `🚀 DiT 效率加载器` / `📊 XY 输入: UNet3` 处理 DiT 模型（Anima / Z-Image / Krea-2 等）时，需要 模型等加载后端已就绪——沿用上游 efficiency 的加载逻辑。
+- `🚀 DiT 效率加载器` / `📊 XY 输入: UNet2` 处理 DiT 模型（Anima / Z-Image / Krea-2 等）时，需要 模型等加载后端已就绪——沿用上游 efficiency 的加载逻辑。
 
 ---
 
@@ -100,12 +100,12 @@ ComfyUI/
 | 🎨 Prompt Studio | 🎨 Prompt Studio 正向输出 | `PromptStudioPositiveOutput` | 同上，只输出正向 |
 | 🎨 Prompt Studio | 🎨 Prompt Studio 反向输出 | `PromptStudioNegativeOutput` | 同上，只输出反向 |
 | 📊 xy图表 | 📊 XY 图表 | `⚡ XY Plot` | XY Plot 引擎，输出拼接网格图 |
-| 📊 xy图表 | 📊 XY 输入: LoRA | `⚡ XY Input: LoRA` | 按 LoRA 换轴（含文件夹筛选、tag 注入） |
 | 📊 xy图表 | 📊 XY 输入: LoRA 图表 | `⚡ XY Input: LoRA Plot` | LoRA 轴专用图表变体 |
-| 📊 xy图表 | 📊 XY 输入: UNet模型 | `⚡ XY Input: UNet Model` | 按 UNet 模型换轴 |
-| 📊 xy图表 | 📊 XY 输入: LoRA2 | `WindMixLoraXY` | LoRA 轴（WindMix 版，行 UI 动态显隐） |
-| 📊 xy图表 | 📊 XY 输入: UNet2 | `WindMixUNetXY` | UNet 轴（带文件夹筛选 UI） |
-| 📊 xy图表 | 📊 XY 输入: UNet3 | `WindMixUNet3XY` | UNet/DiT 轴（外部 MODEL 对象接入，动态接口） |
+| 📊 xy图表 | ~~📊 XY 输入: UNet模型~~ | `⚡ XY Input: UNet Model` | 已删除，功能并入 `WindMixUNetXY` |
+| 📊 xy图表 | 📊 XY 输入: LoRA | `WindMixLoraXY` | LoRA 轴（行 UI、配方分组、tag 自动填） |
+| 📊 xy图表 | 📊 XY 输入: UNet | `WindMixUNetXY` | UNet/DiT 轴（卡片行 UI + 文件夹浏览弹窗） |
+| 📊 xy图表 | 📊 XY 输入: UNet2 | `WindMixUNet3XY` | UNet/DiT 轴（外部 MODEL 对象接入，动态接口） |
+| 📊 xy图表 | 📊 XY 输入: Checkpoint | `WindMixCkptXY` | 底模轴（与 UNet 同一套界面，数据源换 checkpoints） |
 | 🧩 杂项 | 🧩 Fancy Timer Node | `FancyTimerNode` | 定时 / 延时触发节点 |
 | 🧩 杂项 | 🧩 Prompt Groups | `WindMix_PromptGroups` | 按分隔行切组、批量输出提示词 |
 | 🧩 杂项 | 🧩 Wildcard Concat (Dynamic) | `Wind_WildcardConcat_Dynamic` | 动态通配符拼接（含 `/wildmix/` 路由） |
@@ -126,7 +126,7 @@ ComfyUI/
 
 - 单模型、SDXL、DiT 三类加载器 / 采样器。
 - **DiT 相关 Baked VAE 默认 `"None"`**（内部哨兵同步），非 DiT 模型行为不变。
-- `🚀 DiT 效率加载器` 是 `📊 XY 输入: UNet3` / `📊 XY 输入: UNet模型` 等 DiT 换轴功能的**前置依赖**。
+- `🚀 DiT 效率加载器` 是 `📊 XY 输入: UNet` / `UNet2` 等 DiT 换轴功能的**前置依赖**。
 
 ### 3. 模型组合加载器（🚀）
 
@@ -163,13 +163,11 @@ ComfyUI/
 
 由 `⚡ XY Plot` 引擎驱动，配合各类「XY 输入」节点生成参数网格图：
 
-- **📊 XY 输入: LoRA**：按 LoRA 换轴，支持「LoRA Names+Tags」模式（产出 4 元组，tag 自动拼入正提示词）、文件夹筛选、正向提示词 tag 注入。
-- **📊 XY 输入: UNet2**：按 UNet 模型换轴，带文件夹筛选 UI（根目录 `""` 语义 = 全部）。
-- **📊 XY 输入: UNet3**：**外部 MODEL 对象**接入版——`model1..model20` 动态接口（接上 modelN 自动出现 modelN+1），可接单模型或**融合模型**（两个及以上模型经融合节点输出的对象，非本地文件）。
+- **📊 XY 输入: LoRA**（`WindMixLoraXY`）：WindMix 自有版本，行 UI 用 DOM 渲染（与 LoRA Stack 同一套界面），数据存隐藏字段 `lora_data`，支持 ⠿ 手柄拖动排序、配方分组、tag 自动填；产出 4 元组 `(名称, 模型强度, 1.0, tag)`，tag 自动拼入正提示词，默认第一格是「无 LoRA 基线」。XL 效率加载器和 DiT 效率加载器两条路都走得通。
+- **📊 XY 输入: UNet**：按 UNet 模型换轴，带文件夹筛选 UI（根目录 `""` 语义 = 全部）。- **📊 XY 输入: UNet2**：**外部 MODEL 对象**接入版——`model1..model20` 动态接口（接上 modelN 自动出现 modelN+1），可接单模型或**融合模型**（两个及以上模型经融合节点输出的对象，非本地文件）。
   - 须接 **🚀 DiT 效率加载器**（`is_dit=True`）。
   - 已对齐按名加载路径：融合模型自动继承 Loader 的 **LoRA** 与 **shift**（注入前先克隆模型，避免污染原始对象或在网格多格间叠加权重）。
   - ⚠️ 融合模型须与 Loader 同 family（同 CLIP/VAE 类型），否则编码 / 解码维度不匹配会畸形。
-- **📊 XY 输入: LoRA2**：WindMix 自有版本，行 UI 用 DOM 渲染，数据存隐藏字段 `lora_data`，支持 ⠿ 手柄拖动排序。
 
 ### 7. 杂项（🧩）
 
@@ -229,9 +227,9 @@ ComfyUI-WindMix/
 │   ├── windmix_preset_text.py              # 🎨 预设文本
 │   ├── windmix_resolution.py               # 🧩 分辨率
 │   ├── windmix_image_compare.py            # 🧩 图像对比
-│   ├── windmix_xy_inputs.py                # 📊 XY 输入: LoRA2 / UNet2 / UNet3
+│   ├── windmix_xy_inputs.py                # 📊 XY 输入: LoRA / UNet / UNet2 / Checkpoint
 │   ├── xy/                                 # XY 子包
-│   │   └── xy_plot_nodes.py                # 📊 XY 图表 + XY 输入: LoRA / LoRA 图表 / UNet模型
+│   │   └── xy_plot_nodes.py                # 📊 XY 图表 + LoRA 图表（老版 XY Input: LoRA / UNet Model 已删除）
 │   └── py/                                 # 上游 helper（bnk_* / smZ_*，保留原 CATEGORY）
 ├── web/                           # 前端扩展（每个节点模块配套 .js）
 │   ├── windmix_*.js               # 各节点前端
@@ -257,7 +255,7 @@ ComfyUI-WindMix/
 
 1. **与原插件共存**
 2. **从旧版升级**：早期版本用过 `efficiency_nodes.py` / `tsc_utils.py` 等上游原名，升级时建议**整体覆盖** `ComfyUI-WindMix/` 目录，避免旧文件残留造成 `sys.modules` 冲突。
-3. **DiT 换轴前置**：`📊 XY 输入: UNet3` / `📊 XY 输入: UNet模型` 必须接 `🚀 DiT 效率加载器`；融合模型须与 Loader 同 family。
+3. **DiT 换轴前置**：`📊 XY 输入: UNet` / `UNet2` 必须接 `🚀 DiT 效率加载器`；融合模型须与 Loader 同 family。
 4. **改动生效条件**：JS 改完硬刷即可；`api.py` / `*.py` 改动**必须重启 ComfyUI**。
 5. **XY 标签字体**：默认走系统字体（见「依赖」）。若某台机器系统字体都不匹配，可在 `Font/` 放一份 `AlibabaPuHuiTi-3-55-Regular.ttf`，会被优先使用。
 6. **模型预览图**：模型中带文件夹里放**同名图片**（`xxx.safetensors` ↔ `xxx.png` / `xxx.preview.png`）即会显示在预览浮窗；没有同名图就不显示（不再依赖其他插件的预览数据）。

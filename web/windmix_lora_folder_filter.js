@@ -281,7 +281,7 @@ function openFolderModal(node, currentSelected, onApply) {
     apply.onclick = () => {
         const allPrefixes = collectDescendantPrefixes(tree, new Set());
         // 丢根目录 ""，仅保留具体子目录。根目录与具体目录并存时，applyFilter 里
-        // ndir.startsWith("") 会匹配全部，导致筛选失效（同 UNet2 节点修复）。
+        // ndir.startsWith("") 会匹配全部，导致筛选失效（同 UNet 节点修复）。
         const nonRoot = [...selected].filter((p) => p !== "");
         const selHasAll = [...selected].sort().join("|") === [...allPrefixes].sort().join("|");
         const isAll = nonRoot.length === 0 || selHasAll;

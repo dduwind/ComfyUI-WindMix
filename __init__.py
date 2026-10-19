@@ -24,14 +24,15 @@
 # Fourth batch, from efficiency-nodes-comfyui (prefixed ⚡ to coexist with the
 # original plugin, which the user keeps until satisfied):
 #   - ⚡ Efficient Loader / ⚡ KSampler (Efficient) / ⚡ KSampler Adv. (Efficient)
-#   - ⚡ XY Plot + ⚡ XY Input: LoRA + ⚡ XY Input: LoRA Plot
+#   - ⚡ XY Plot + ⚡ XY Input: LoRA Plot（⚡ XY Input: LoRA 已删除，改由 WindMixLoraXY 提供）
 #   - ⚡ DiT Efficient Loader (NEW) — loads separated-file DiT models
 #     (Anima / Z-Image / ZiB / Krea-2) and drops into KSampler (Efficient).
-#   - ⚡ XY Input: UNet Model (NEW) — swaps the diffusion model in XY plots.
+#   - （⚡ XY Input: UNet Model 已删除：功能由 📊 XY 输入: UNet 覆盖；
+#      📊 XY 输入: Checkpoint 由 WindMixCkptXY 提供，两者共用同一套前端界面）
 #   - ⚡ 模型组合加载器 (NEW, windmix_model_set_loader.py) — 参考 ComfyUI-TJ_NODE 的
 #     model_set_loader：分别选 unet/clip/vae，委托原生 UNETLoader/CLIPLoader/VAELoader
 #     一次性输出 MODEL+CLIP+VAE，每槽位支持 [none]，支持 GGUF 与 dtype。
-#   - All XY-Plot nodes (⚡ XY Plot / ⚡ XY Input: LoRA / LoRA Plot / UNet Model)
+#   - All XY-Plot nodes (⚡ XY Plot / LoRA Plot + 📊 XY 输入: LoRA/UNet/UNet2/Checkpoint)
 #     live in the `nodes/xy/` subpackage, imported via the "xy" entry in
 #     NODE_MODULES below. The stitched grid is exposed by the KSampler nodes'
 #     "XY Plot" output pin (the old standalone ⚡ XY 图表拼接 node was removed).

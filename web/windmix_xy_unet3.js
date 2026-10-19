@@ -1,5 +1,5 @@
 // web/windmix_xy_unet3.js
-// ⚡ XY 输入: UNet3 — 动态 MODEL 输入接口
+// 📊 XY 输入: UNet2（类名 WindMixUNet3XY）— 动态 MODEL 输入接口
 //
 // 行为复刻 web/windmix_merge_text.js 的动态接口逻辑：
 //   后端在 INPUT_TYPES 里预定义了 model1..model20 共 20 个 forceInput MODEL 接口，

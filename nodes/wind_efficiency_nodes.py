@@ -867,7 +867,7 @@ class Wind_KSampler:
                 dit_shift = dependencies[19] if len(dependencies) > 19 else 0.0
                 dit_clip_type_override = dependencies[20] if len(dependencies) > 20 else "QWEN_IMAGE"
                 dit_unet_name = ckpt_name  # updated by the "DiT Model" XY axis
-                # "DiT Model" 轴接外部 MODEL 对象（UNet3：外部接入/融合模型）时非 None，
+                # "DiT Model" 轴接外部 MODEL 对象（📊 XY 输入: UNet2 / WindMixUNet3XY：外部接入/融合模型）时非 None，
                 # define_model 里直接用该对象、跳过按名加载。字符串路径下保持 None。
                 dit_model_obj = None
                 base_lora_stack = lora_stack  # snapshot the DiT Efficient Loader's persistent LoRA (built-in lora_name + lora_stack input port); re-applied on every XY reload so it survives across cells
@@ -1229,7 +1229,7 @@ class Wind_KSampler:
                 # Mirrors the Checkpoint branch but feeds the separated-file loader path in define_model.
                 elif var_type == "DiT Model":
                     if isinstance(var[0], str):
-                        # 字符串路径：按名字加载（UNet2 / XY Input: UNet Model）
+                        # 字符串路径：按名字加载（📊 XY 输入: UNet / WindMixUNetXY）
                         dit_model_obj = None
                         dit_unet_name = var[0]
                         if var[1] is not None:
@@ -1239,7 +1239,7 @@ class Wind_KSampler:
                         ckpt_filename = os.path.splitext(os.path.basename(dit_unet_name))[0]
                         text = f"{ckpt_filename}"
                     else:
-                        # MODEL 对象路径：直连（UNet3：外部接入/融合模型，无本地文件名）。
+                        # MODEL 对象路径：直连（📊 XY 输入: UNet2：外部接入/融合模型，无本地文件名）。
                         # define_model 里直接用该对象、跳过按名加载。
                         dit_model_obj = var[0]
                         if len(var) > 1 and var[1] is not None:
@@ -1395,8 +1395,8 @@ class Wind_KSampler:
                 # guard would make rows >0 reuse row 0's unet and pile LoRA patches on top -> broken grid.
                 if is_dit and (X_type == "DiT Model" or Y_type == "DiT Model"):
                     if dit_model_obj is not None:
-                        # MODEL 对象直连（UNet3：外部接入/融合模型）：跳过按名加载，
-                        # 但必须与按名加载路径(UNet2)对齐：
+                        # MODEL 对象直连（📊 XY 输入: UNet2：外部接入/融合模型）：跳过按名加载，
+                        # 但必须与按名加载路径（📊 XY 输入: UNet）对齐：
                         # ① 注入 DiT Efficient Loader 的 shift（dit_shift>0 时），否则非默认 shift 丢失；
                         # ② 把 Loader 的 LoRA（lora_name widget + lora_stack 端口）注入融合模型，否则
                         #    加速 LoRA 等缺失会导致出图畸形。
@@ -1414,7 +1414,7 @@ class Wind_KSampler:
                             try:
                                 model.model.model_sampling.set_parameters(shift=float(dit_shift))
                             except Exception as _e:
-                                print(f"[WindMix] UNet3 could not set shift on {type(model.model.model_sampling).__name__}: {_e}")
+                                print(f"[WindMix] XY 输入: UNet2（对象直连）could not set shift on {type(model.model.model_sampling).__name__}: {_e}")
                                 class _MS(comfy.model_sampling.ModelSamplingFlux, comfy.model_sampling.CONST):
                                     pass
                                 _ms = _MS(model.model.model_config)

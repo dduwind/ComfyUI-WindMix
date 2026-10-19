@@ -6,7 +6,7 @@
 #                                   上（clip 传 None，不输出 CLIP）。
 #
 # 界面在 web/windmix_lora_manager.js（搜索即添加 + Add LoRA 浏览弹窗 + 固定高度内滚动列表 +
-# 配方分组整体拖拽），⚡ XY 输入: LoRA2（WindMixLoraXY）共用那套界面。
+# 配方分组整体拖拽），⚡ XY 输入: LoRA（WindMixLoraXY）共用那套界面。
 #
 # 持久化：隐藏的 `lora_data` STRING 控件存 JSON，ComfyUI 自动序列化，后端只解析：
 #   顶层行 [{on, name, model, tag}, ...] / 配方组 [{folder, on, open, loras:[...]}, ...] / {loras:[...]}
