@@ -19,6 +19,11 @@
 #       输出单个 XY 引脚（x_or_y），接到 ⚡ XY Plot 的 X 或 Y 输入。
 #       每个启用行 = 一个格子，单元格 = (unet_name, None, None)。
 #
+#   - WindMixUNet2XY ：📊 XY 输入: UNet2
+#       不走本地文件名，改用外部 MODEL 对象直连：model1..model20 动态接口
+#       （前端 web/windmix_xy_unet2.js），可接融合模型。单元格 = (model对象, None, None, 标签)。
+#       2026-10-20 由旧类名 WindMixUNet3XY 改名而来，旧键留作 DEPRECATED 别名 → 老图照常加载。
+#
 #   - WindMixCkptXY  ：⚡ XY 输入: Checkpoint
 #       与 UNet 同一个前端（web/windmix_xy_unet_manager.js 按节点类型配置数据源），
 #       行是[手柄/开关/名称/删除]、可多选浏览弹窗，数据落在隐藏的 `ckpt_data` 控件。
@@ -40,8 +45,8 @@ import json
 from .windmix_lora_nodes import _parse_stack
 
 MAX_ROWS = 50
-# WindMixUNet3XY（显示名 📊 XY 输入: UNet2）动态外部接口的上限（与合并文本一致）：model1..model20
-MAX_UNET3_MODELS = 20
+# WindMixUNet2XY（显示名 📊 XY 输入: UNet2）动态外部接口的上限（与合并文本一致）：model1..model20
+MAX_UNET_MODELS = 20
 
 
 class WindMixLoraXY:
@@ -99,12 +104,12 @@ class WindMixUNetXY:
         return (("DiT Model", cells),) if cells else (None,)
 
 
-class WindMixUNet3XY:
+class WindMixUNet2XY:
     """XY 输入：UNet / DiT 模型（外部连线动态接口版 · MODEL 对象直连）。
 
     与 UNet 同属 "DiT Model" 轴，但模型不从本地下拉选、而是从外部 MODEL 接口接入：
     每个 model1..modelN 接一个已加载的模型（UNETLoader 输出，或模型融合节点输出的
-    融合模型——没有本地文件名的那种）。前端（web/windmix_xy_unet3.js）负责动态接口：
+    融合模型——没有本地文件名的那种）。前端（web/windmix_xy_unet2.js）负责动态接口：
     初始只留 model1，接上 modelN 自动追加 modelN+1，断开后清理多余空接口。
 
     后端把「已连接」的模型对象收集成 (model对象, None, None, 标签) 单元格，
@@ -115,7 +120,7 @@ class WindMixUNet3XY:
     @classmethod
     def INPUT_TYPES(cls):
         optional = {}
-        for i in range(1, MAX_UNET3_MODELS + 1):
+        for i in range(1, MAX_UNET_MODELS + 1):
             optional[f"model{i}"] = ("MODEL", {"forceInput": True})
         return {"optional": optional}
 
@@ -126,7 +131,7 @@ class WindMixUNet3XY:
 
     def xy_value(self, **kwargs):
         cells = []
-        for i in range(1, MAX_UNET3_MODELS + 1):
+        for i in range(1, MAX_UNET_MODELS + 1):
             m = kwargs.get(f"model{i}")
             if m is None:
                 continue
@@ -134,6 +139,19 @@ class WindMixUNet3XY:
             # 第 4 元素 label 作网格单元格标题（融合模型无文件名，按槽位编号占位）。
             cells.append((m, None, None, f"模型{i}"))
         return (("DiT Model", cells),) if cells else (None,)
+
+
+class WindMixUNet3XY(WindMixUNet2XY):
+    """旧注册键兼容别名（2026-10-20 之前的类名，当时显示名是 📊 XY 输入: UNet3）。
+
+    工作流 json 里存的是注册键而不是显示名，所以历史图仍然写着 "WindMixUNet3XY"。
+    这个空壳子类把它继续注册出去（逻辑全部继承自 WindMixUNet2XY），老图就能照常加载；
+    DEPRECATED=True 让「添加节点」搜索菜单默认不再列出它（由前端设置 Comfy.Node.ShowDeprecated
+    控制，关掉即隐藏），新图请用 📊 XY 输入: UNet2。
+    ⚠️ 必须是独立的类对象（而不是把两个键指向同一个类）：前端扩展按 beforeRegisterNodeDef
+    给每个注册类型装动态接口钩子，同一个类被注册两次会把钩子套两层。"""
+
+    DEPRECATED = True
 
 
 class WindMixCkptXY:
@@ -173,15 +191,18 @@ class WindMixCkptXY:
 NODE_CLASS_MAPPINGS = {
     "WindMixLoraXY": WindMixLoraXY,
     "WindMixUNetXY": WindMixUNetXY,
-    "WindMixUNet3XY": WindMixUNet3XY,
+    "WindMixUNet2XY": WindMixUNet2XY,
+    "WindMixUNet3XY": WindMixUNet3XY,   # 旧键兼容别名，见上面类注释
     "WindMixCkptXY": WindMixCkptXY,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    # 只改显示名，注册键（WindMixUNetXY / WindMixUNet3XY）不动 → 历史工作流照旧加载。
-    # 2026-10-19 起：UNet2→UNet（按本地文件名换轴），UNet3→UNet2（外部 MODEL 对象接入）。
+    # 注册键就是工作流里的存档标识，改键 = 老图坏掉，所以只做「加新键 + 旧键转别名」：
+    #   2026-10-19 显示名轮换：UNet2→UNet（按本地文件名换轴），UNet3→UNet2（外部 MODEL 对象接入）。
+    #   2026-10-20 类名跟着对齐：WindMixUNet3XY → WindMixUNet2XY，旧键留作 DEPRECATED 别名。
     "WindMixLoraXY": "📊 XY 输入: LoRA",
     "WindMixUNetXY": "📊 XY 输入: UNet",
-    "WindMixUNet3XY": "📊 XY 输入: UNet2",
+    "WindMixUNet2XY": "📊 XY 输入: UNet2",
+    "WindMixUNet3XY": "📊 XY 输入: UNet2（旧存档兼容）",
     "WindMixCkptXY": "📊 XY 输入: Checkpoint",
 }

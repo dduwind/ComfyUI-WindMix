@@ -104,7 +104,8 @@ ComfyUI/
 | 📊 xy图表 | ~~📊 XY 输入: UNet模型~~ | `⚡ XY Input: UNet Model` | 已删除，功能并入 `WindMixUNetXY` |
 | 📊 xy图表 | 📊 XY 输入: LoRA | `WindMixLoraXY` | LoRA 轴（行 UI、配方分组、tag 自动填） |
 | 📊 xy图表 | 📊 XY 输入: UNet | `WindMixUNetXY` | UNet/DiT 轴（卡片行 UI + 文件夹浏览弹窗） |
-| 📊 xy图表 | 📊 XY 输入: UNet2 | `WindMixUNet3XY` | UNet/DiT 轴（外部 MODEL 对象接入，动态接口） |
+| 📊 xy图表 | 📊 XY 输入: UNet2 | `WindMixUNet2XY` | UNet/DiT 轴（外部 MODEL 对象接入，动态接口） |
+| 📊 xy图表 | 📊 XY 输入: UNet2（旧存档兼容） | `WindMixUNet3XY` | 上一个节点改名前的旧注册键，只为让老工作流照常加载；标了 DEPRECATED，搜索菜单默认不出现，新图请用 `WindMixUNet2XY` |
 | 📊 xy图表 | 📊 XY 输入: Checkpoint | `WindMixCkptXY` | 底模轴（与 UNet 同一套界面，数据源换 checkpoints） |
 | 🧩 杂项 | 🧩 Fancy Timer Node | `FancyTimerNode` | 定时 / 延时触发节点 |
 | 🧩 杂项 | 🧩 Prompt Groups | `WindMix_PromptGroups` | 按分隔行切组、批量输出提示词 |
@@ -255,6 +256,8 @@ ComfyUI-WindMix/
 
 1. **与原插件共存**
 2. **从旧版升级**：早期版本用过 `efficiency_nodes.py` / `tsc_utils.py` 等上游原名，升级时建议**整体覆盖** `ComfyUI-WindMix/` 目录，避免旧文件残留造成 `sys.modules` 冲突。
+   - 2026-10-20 那次覆盖后要**顺手删掉旧 `web/windmix_xy_unet3.js`**（已改名成 `windmix_xy_unet2.js`）：两个文件都在会各注册一次动态接口钩子。
+   - 同日 `WindMixUNet3XY` 类名改为 `WindMixUNet2XY`，旧键作为 DEPRECATED 别名继续注册，老工作流无需迁移即可加载。
 3. **DiT 换轴前置**：`📊 XY 输入: UNet` / `UNet2` 必须接 `🚀 DiT 效率加载器`；融合模型须与 Loader 同 family。
 4. **改动生效条件**：JS 改完硬刷即可；`api.py` / `*.py` 改动**必须重启 ComfyUI**。
 5. **XY 标签字体**：默认走系统字体（见「依赖」）。若某台机器系统字体都不匹配，可在 `Font/` 放一份 `AlibabaPuHuiTi-3-55-Regular.ttf`，会被优先使用。

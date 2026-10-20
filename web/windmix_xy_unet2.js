@@ -1,5 +1,5 @@
-// web/windmix_xy_unet3.js
-// 📊 XY 输入: UNet2（类名 WindMixUNet3XY）— 动态 MODEL 输入接口
+// web/windmix_xy_unet2.js
+// 📊 XY 输入: UNet2（类名 WindMixUNet2XY）— 动态 MODEL 输入接口
 //
 // 行为复刻 web/windmix_merge_text.js 的动态接口逻辑：
 //   后端在 INPUT_TYPES 里预定义了 model1..model20 共 20 个 forceInput MODEL 接口，
@@ -10,18 +10,21 @@
 //   这样界面上不会一次性冒出 20 个接口，而是随连线动态增减。
 //
 // 每个接口接一个 MODEL 对象（UNETLoader 输出，或模型融合节点输出的融合模型）。
+//
+// NODE_TYPES 里同时带上旧键 WindMixUNet3XY：老工作流存的还是旧键，
+//   那两个注册键是两个独立类对象（后端用空壳子类做别名），各自装一次钩子，不会重复。
 
 import { app } from "../../scripts/app.js";
 
-const NODE_TYPE = "WindMixUNet3XY";
+const NODE_TYPES = ["WindMixUNet2XY", "WindMixUNet3XY"];
 const MAX_MODELS = 20;
 
 app.registerExtension({
-    name: "WindMix.UNet3XY.DynamicInputs",
+    name: "WindMix.UNet2XY.DynamicInputs",
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
         const typeKey = nodeData.name || (nodeType && nodeType.comfyClass);
-        if (typeKey !== NODE_TYPE) return;
-        console.log("[WindMix.UNet3XY] dynamic MODEL inputs hooked for", nodeData.name);
+        if (NODE_TYPES.indexOf(typeKey) < 0) return;
+        console.log("[WindMix.UNet2XY] dynamic MODEL inputs hooked for", nodeData.name);
 
         const origOnNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
@@ -33,10 +36,10 @@ app.registerExtension({
                         ensureOneFreeModelInput(node, true);
                         node.size = node.computeSize(node.size);
                         if (app.graph) app.graph.setDirtyCanvas(true, true);
-                    } catch (e) { console.error("WindMixUNet3XY init error:", e); }
+                    } catch (e) { console.error("WindMixUNet2XY init error:", e); }
                 }, 0);
             } catch (e) {
-                console.error("WindMixUNet3XY init schedule error:", e);
+                console.error("WindMixUNet2XY init schedule error:", e);
             }
             return r;
         };
@@ -51,7 +54,7 @@ app.registerExtension({
                         ensureOneFreeModelInput(node, false);
                         node.size = node.computeSize(node.size);
                         if (app.graph) app.graph.setDirtyCanvas(true, true);
-                    } catch (e) { console.error("WindMixUNet3XY conn change error:", e); }
+                    } catch (e) { console.error("WindMixUNet2XY conn change error:", e); }
                 }, 50);
             }
             return r;

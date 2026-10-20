@@ -7,7 +7,7 @@
 #         WindMixLoraXY (nodes/windmix_xy_inputs.py), which emits the same XY tuple.
 #   NOTE: the old "⚡ XY Input: UNet Model" node was removed too — its DiT Model axis
 #         is covered by "📊 XY 输入: UNet" (WindMixUNetXY); the object-direct
-#         UNet2 (WindMixUNet3XY) and Checkpoint inputs also live in nodes/windmix_xy_inputs.py.
+#         UNet2 (WindMixUNet2XY) and Checkpoint inputs also live in nodes/windmix_xy_inputs.py.
 #
 
 # NOTE: The standalone "⚡ XY 图表拼接" node was removed. The ⚡ KSampler

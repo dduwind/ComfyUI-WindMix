@@ -867,7 +867,7 @@ class Wind_KSampler:
                 dit_shift = dependencies[19] if len(dependencies) > 19 else 0.0
                 dit_clip_type_override = dependencies[20] if len(dependencies) > 20 else "QWEN_IMAGE"
                 dit_unet_name = ckpt_name  # updated by the "DiT Model" XY axis
-                # "DiT Model" 轴接外部 MODEL 对象（📊 XY 输入: UNet2 / WindMixUNet3XY：外部接入/融合模型）时非 None，
+                # "DiT Model" 轴接外部 MODEL 对象（📊 XY 输入: UNet2 / WindMixUNet2XY：外部接入/融合模型）时非 None，
                 # define_model 里直接用该对象、跳过按名加载。字符串路径下保持 None。
                 dit_model_obj = None
                 base_lora_stack = lora_stack  # snapshot the DiT Efficient Loader's persistent LoRA (built-in lora_name + lora_stack input port); re-applied on every XY reload so it survives across cells
@@ -1383,6 +1383,21 @@ class Wind_KSampler:
                         m, c = comfy.sd.load_lora_for_models(m, c, _lora, _lm, _lc)
                     return m, c
 
+                # WindMix: non-DiT counterpart of _reapply_base_lora. When an XY axis is a LoRA
+                # type, lora_stack is cleared above (line ~972) and replaced by the per-cell
+                # stack, which silently drops the Efficient Loader's own LoRA (base_lora_stack)
+                # on every cell -- the DiT path compensates via _reapply_base_lora, the SDXL/UNet
+                # path did not. Merge base ahead of the cell stack so both paths share the same
+                # semantics: base model -> loader LoRA -> cell LoRA. No-op when the loader
+                # carries no LoRA (returns the cell stack untouched, so behavior is identical).
+                def _merged_lora_stack(cell_stack):
+                    if not base_lora_stack:
+                        return cell_stack
+                    merged = [e for e in base_lora_stack if isinstance(e, (list, tuple)) and len(e) >= 2]
+                    if cell_stack:
+                        merged.extend(cell_stack)
+                    return merged
+
                 # Unpack types tuple
                 X_type, Y_type = types
 
@@ -1429,10 +1444,14 @@ class Wind_KSampler:
 
                 # Load Checkpoint if required. If Y_type is LoRA, required models will be loaded by load_lora func.
                 if (X_type == "Checkpoint" and index == 0 and Y_type not in ("LoRA", "LoRA Stacks")):
-                    if is_dit:
-                        model, clip, vae = _windmix_dit_load(dit_unet_name, dit_clip_name, vae_name, dit_family, dit_shift, dit_clip_type_override)
-                        model, clip = _reapply_base_lora(model, clip)
-                    elif lora_stack is None:
+                    # NOTE: deliberately no is_dit special case. A Checkpoint axis carries merged
+                    # SDXL-style checkpoints (ckpt_name), which must go through load_checkpoint /
+                    # load_lora. Routing them through _windmix_dit_load(dit_unet_name) instead
+                    # reloads the loader's own DiT model in every cell and ignores the axis value
+                    # entirely -- "DiT Model" is the correct axis for swapping separated-file
+                    # DiT models. The loader's own LoRA (lora_stack == base_lora_stack here) is
+                    # still applied on top of each checkpoint by the else branch below.
+                    if lora_stack is None:
                         model, clip, _ = load_checkpoint(ckpt_name, xyplot_id, cache=cache[1])
                     else: # Load Efficient Loader LoRA
                         model, clip = load_lora(lora_stack, ckpt_name, xyplot_id,
@@ -1461,11 +1480,12 @@ class Wind_KSampler:
                                 lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
                                 model, clip = comfy.sd.load_lora_for_models(model, clip, lora, lora_stack[0][1], lora_stack[0][2])
                     else:
-                        # Don't cache Checkpoints
-                        model, clip = load_lora(lora_stack, ckpt_name, xyplot_id, cache=cache[2])
+                        # Don't cache Checkpoints; merge the loader's own LoRA ahead of the
+                        # per-cell stack so it survives every XY cell (see _merged_lora_stack).
+                        model, clip = load_lora(_merged_lora_stack(lora_stack), ckpt_name, xyplot_id, cache=cache[2])
                     encode = True
                 elif Y_type in ("LoRA", "LoRA Stacks"):  # X_type must be Checkpoint, so cache those as defined
-                    if is_dit:
+                    if is_dit and X_type != "Checkpoint":
                         # For DiT LoRA axes each cell must start from the clean, un-patched base
                         # (a fresh clone of original_model/original_clip) so LoRA patches don't
                         # accumulate across X/Y cells. Without this, cell N would carry LoRAs 0..N-1
@@ -1485,7 +1505,10 @@ class Wind_KSampler:
                                 lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
                                 model, clip = comfy.sd.load_lora_for_models(model, clip, lora, lora_stack[0][1], lora_stack[0][2])
                     else:
-                        model, clip = load_lora(lora_stack, ckpt_name, xyplot_id,
+                        # X_type == "Checkpoint" (or non-DiT): load the checkpoint named by the
+                        # axis and merge the loader's own LoRA ahead of the per-cell stack
+                        # (see _merged_lora_stack) so both survive across cells.
+                        model, clip = load_lora(_merged_lora_stack(lora_stack), ckpt_name, xyplot_id,
                                                 cache=None, ckpt_cache=cache[1])
                     encode = True
                 elif X_type == "LoRA Batch" or X_type == "LoRA Wt" or X_type == "LoRA MStr" or X_type == "LoRA CStr":
@@ -1509,8 +1532,9 @@ class Wind_KSampler:
                                 lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
                                 model, clip = comfy.sd.load_lora_for_models(model, clip, lora, lora_stack[0][1], lora_stack[0][2])
                     else:
-                        # Don't cache Checkpoints or LoRAs
-                        model, clip = load_lora(lora_stack, ckpt_name, xyplot_id, cache=0)
+                        # Don't cache Checkpoints or LoRAs; merge the loader's own LoRA ahead
+                        # of the per-cell stack (see _merged_lora_stack).
+                        model, clip = load_lora(_merged_lora_stack(lora_stack), ckpt_name, xyplot_id, cache=0)
                     encode = True
 
                 if (X_type == "Refiner" and index == 0) or Y_type == "Refiner":
