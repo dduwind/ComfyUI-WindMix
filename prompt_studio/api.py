@@ -31,8 +31,14 @@ NODE_DIR = Path(__file__).resolve().parent
 PACKAGE_DIR = NODE_DIR.parent
 CUSTOM_NODES_DIR = PACKAGE_DIR.parent
 WEB_DIR = PACKAGE_DIR / "web"
-PROMPT_STATIC_DIR = WEB_DIR / "prompt_static"
-PROMPT_BUNDLE_DIR = WEB_DIR / "prompt_bundle"
+# ⚠️ 这两个目录刻意不放 web/ 下：ComfyUI 的 server.py 会把插件 web/ 里**任何** .js
+# 递归 glob 出来、当扩展 import 进主页面（没有开关可关）。而 prompt 旧编辑器的
+# jquery / clipboard / main / newbieXmlWizard / main.entry.js 只属于 iframe 那个独立
+# 页面，被主页面执行除了白白解析 1.2MB、还会把全局 $ 和第二份 Vue 塞进 ComfyUI。
+# 所以它们住在后端包目录里，由本文件下面的 /WM_prompt/web_ui 与
+# /WM_sd-webui-prompt-all-in-one-js 两条路由按需服务。
+PROMPT_STATIC_DIR = NODE_DIR / "web_static"
+PROMPT_BUNDLE_DIR = NODE_DIR / "web_bundle"
 PROMPT_BUNDLE_FILE = PROMPT_BUNDLE_DIR / "main.entry.js"
 
 STORAGE_DIR = NODE_DIR / "storage"
@@ -407,6 +413,43 @@ def _copy_legacy_bundle_if_needed() -> None:
     PROMPT_BUNDLE_FILE.write_text(_read_text_best_effort(LEGACY_PROMPT_BUNDLE_FILE), encoding="utf-8")
 
 
+# ComfyUI 0.42+ 兼容补丁：老 bundle 里有两处与新版前端不兼容，会让 Prompt Studio
+# 面板初始化时抛错（面板本身仍能显示，但控制台一直报错）：
+#   1) for...of this.packagesState —— packages_state 可能为空对象/普通对象，不可迭代
+#      → "TypeError: object is not iterable"。改用 Object.values() 兼容数组与对象两种形态。
+#   2) computed.langName 的兜底写成 `return item.name`，item 是根本不存在的变量
+#      → "ReferenceError: item is not defined"。改为返回第一个语言的名称。
+# 该 bundle 源自 weilin-comfyui-prompt-all-in-one-page-unlock，插件更新可能被覆盖，
+# 因此每次启动都做一次幂等修补（已修补过的文件里找不到原始模式，自然跳过）。
+_BUNDLE_PATCHES = [
+    ("for(let t of this.packagesState)", "for(let t of Object.values(this.packagesState||{}))"),
+    ("for(let e of this.packagesState)", "for(let e of Object.values(this.packagesState||{}))"),
+    ("this.packagesState.forEach(", "Object.values(this.packagesState||{}).forEach("),
+    ("return item.name", 'return(this.languages[Object.keys(this.languages)[0]]||{}).name||""'),
+]
+
+
+def _patch_bundle_for_comfyui_042() -> None:
+    if not PROMPT_BUNDLE_FILE.exists():
+        return
+    try:
+        text = PROMPT_BUNDLE_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return
+    changed = False
+    for old, new in _BUNDLE_PATCHES:
+        if old in text:
+            text = text.replace(old, new)
+            changed = True
+    if not changed:
+        return
+    try:
+        PROMPT_BUNDLE_FILE.write_text(text, encoding="utf-8", newline="")
+        print("[WindMix] Prompt Studio bundle: 已应用 ComfyUI 0.42+ 兼容补丁")
+    except OSError as exc:
+        print(f"[WindMix] Prompt Studio bundle 兼容补丁写入失败: {exc}")
+
+
 def _list_loras() -> list[str]:
     names = []
     for filename in _get_folder_filename_list("loras"):
@@ -677,7 +720,10 @@ def _load_translate_apis():
 
 
 def _get_packages_state():
-    return {}
+    # 前端 bundle 用 for...of 遍历并读取每项的 .name / .state —— 需要**数组**。
+    # 之前这里返回 {}（空对象），导致 `for...of {}` 抛 "object is not iterable"，
+    # 进而让 Prompt Studio 面板在初始化时报错。空数组 = 没有待安装的包。
+    return []
 
 
 def _get_extensions():
@@ -882,6 +928,7 @@ def register_prompt_studio_routes():
 
     _ensure_dirs()
     _copy_legacy_bundle_if_needed()
+    _patch_bundle_for_comfyui_042()
     prompt_server = getattr(PromptServer, "instance", None)
     if prompt_server is None:
         return False
