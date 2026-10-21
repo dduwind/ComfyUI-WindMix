@@ -1,5 +1,10 @@
 import { attachAutocompleteToIframe } from "./windmix_autocomplete.js";
 
+// 旧版 Prompt Studio 编辑页。资源已从 web/ 挪到后端包目录
+// （prompt_studio/web_static/），因为 web/ 下的任何 .js 都会被 ComfyUI 当扩展
+// 自动 import 进主页面。页面本身仍由插件自己的路由服务，路径不能再走 /extensions/。
+const LEGACY_PAGE_URL = "/WM_prompt/web_ui/index.html";
+
 const WINDOW_KEYS = {
     randomId: "prompt_randomid",
     theme: "prompt_theme",
@@ -63,7 +68,6 @@ class LegacyPromptStudioController {
         this.randomId = null;
         this.iframeReady = false;
         this.loadedTheme = null;
-        this.extensionRoot = new URL("../../", import.meta.url).toString().replace(/\/$/, "");
         this.overlay = this.#createOverlay();
         document.body.appendChild(this.overlay);
         window.addEventListener("message", (event) => this.#handleMessage(event));
@@ -87,7 +91,7 @@ class LegacyPromptStudioController {
         this.randomId = (Math.random() + Date.now()).toString(32).slice(0, 10);
         localStorage.setItem(WINDOW_KEYS.randomId, this.randomId);
         const theme = localStorage.getItem(WINDOW_KEYS.theme) || "dark";
-        const src = `${this.extensionRoot}/prompt_static/index.html?type=prompt&refid=${encodeURIComponent(this.randomId)}&__theme=${encodeURIComponent(theme)}`;
+        const src = `${LEGACY_PAGE_URL}?type=prompt&refid=${encodeURIComponent(this.randomId)}&__theme=${encodeURIComponent(theme)}`;
         const shouldReload = !this.iframeReady || !this.iframe.src || this.loadedTheme !== theme;
         if (shouldReload) {
             this.iframeReady = false;

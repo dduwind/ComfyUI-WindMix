@@ -10,7 +10,7 @@
 // 数据层不变：API_PRESETS / API_IMAGE、发送节点、导入导出 JSON、localStorage 视图记忆均按原逻辑。
 import { app } from "../../scripts/app.js";
 // 编辑弹窗的内容框自动补全：与「⚡ 预设文本」节点共用同一套引擎与词库缓存
-import { attachAutoComplete, detachAutoComplete } from "./js/prompt_studio/windmix_preset_ac.js";
+import { attachAutoComplete, detachAutoComplete } from "./js/preset_autocomplete/windmix_preset_ac.js";
 
 const API_PRESETS = "/windmix/preset_text/presets";
 const API_IMAGE = "/windmix/preset_text/image";

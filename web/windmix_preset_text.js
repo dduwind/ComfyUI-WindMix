@@ -21,7 +21,7 @@
 import { app } from "../../scripts/app.js";
 // 自动补全：复用 prompt_studio 自带的 TextAreaAutoComplete 引擎，
 // 词库加载 + 挂载封装在 windmix_preset_ac.js（预设文本节点与预设管理器共用同一份缓存）
-import { attachAutoComplete, detachAutoComplete } from "./js/prompt_studio/windmix_preset_ac.js";
+import { attachAutoComplete, detachAutoComplete } from "./js/preset_autocomplete/windmix_preset_ac.js";
 // LoRA 界面共用件：样式、图标、提示条、底距几何引擎
 import {
     injectStyle as injectKitStyle, IC, warn,

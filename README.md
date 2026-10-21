@@ -232,17 +232,24 @@ ComfyUI-WindMix/
 │   ├── xy/                                 # XY 子包
 │   │   └── xy_plot_nodes.py                # 📊 XY 图表 + LoRA 图表（老版 XY Input: LoRA / UNet Model 已删除）
 │   └── py/                                 # 上游 helper（bnk_* / smZ_*，保留原 CATEGORY）
-├── web/                           # 前端扩展（每个节点模块配套 .js）
-│   ├── windmix_*.js               # 各节点前端
-│   ├── js/
-│   │   ├── efficiency/            # 效率节点前端
-│   │   └── prompt_studio/         # 主页面补全引擎 + iframe 控制器
-│   ├── prompt_bundle/             # Prompt Studio 预编译 bundle
-│   └── prompt_static/             # Prompt Studio iframe 静态资源（图标 / 样式扩展）
-├── prompt_studio/                 # Studio-Suite 移植
+├── web/                           # 前端扩展 —— ⚠️ 只有「必须进主页面」的代码放这里
+│   ├── windmix_*.js               # 各节点前端（每个节点模块配套一个 .js）
+│   └── js/
+│       ├── prompt_studio/         # 旧 Prompt Studio 弹窗的桥接层
+│       │   ├── prompt_studio_nodes.js        # 给三个 🎨 节点加「打开」按钮
+│       │   ├── legacy_iframe_controller.js   # 全屏 iframe 弹窗本体
+│       │   └── windmix_autocomplete.js       # 伸进 iframe DOM 的补全引擎
+│       └── preset_autocomplete/   # 🎨 预设文本 / 预设管理器的补全（与上面无关）
+│           ├── windmix_preset_ac.js          # 挂载器 + danbooru 中文词库
+│           ├── autocomplete.js               # TextAreaAutoComplete 引擎
+│           ├── autocomplete.css              # 主页面下拉样式
+│           └── utils.js
+├── prompt_studio/                 # Studio-Suite 移植（后端包）
 │   ├── nodes.py                   # Prompt Studio 三个输出节点
 │   ├── api.py                     # WM_* 路由
 │   ├── model_info.py
+│   ├── web_static/                # iframe 那个页面的 html/css/js/img/styles
+│   ├── web_bundle/                # main.entry.js（旧页面主程序，内含第二份 Vue）
 │   └── storage/                   # 词库（进库）+ 运行时数据（已 gitignore）
 ├── presets/                       # 预设管理器数据
 ├── wildcards/                     # 通配符词库
@@ -263,6 +270,7 @@ ComfyUI-WindMix/
 5. **XY 标签字体**：默认走系统字体（见「依赖」）。若某台机器系统字体都不匹配，可在 `Font/` 放一份 `AlibabaPuHuiTi-3-55-Regular.ttf`，会被优先使用。
 6. **模型预览图**：模型中带文件夹里放**同名图片**（`xxx.safetensors` ↔ `xxx.png` / `xxx.preview.png`）即会显示在预览浮窗；没有同名图就不显示（不再依赖其他插件的预览数据）。
 7. **运行时数据**：`prompt_studio/storage/prompt_data/` 与 `notes/` 由 ComfyUI 运行时自动创建（见 `api.py::_ensure_dirs`），已加入 `.gitignore`。
+8. **为什么 `web_static/` / `web_bundle/` 不放 `web/` 下**：ComfyUI 的 `server.py` 会把插件 `web/` 目录里**任何** `.js` 递归 glob 出来当扩展 import 进主页面，且没有开关可关。旧 Prompt Studio 页面的 jquery / clipboard / main / newbieXmlWizard / `main.entry.js`（约 1.2MB，内含第二份 Vue）不属于扩展，放在 `web/` 下会让每次开页面都白解析一遍，还把全局 `$` 抢进 ComfyUI。它们现在住在后端包目录里，只由 `/WM_prompt/web_ui/{path}` 与 `/WM_sd-webui-prompt-all-in-one-js` 两条路由按需服务。**新加非扩展脚本时同理，别放进 `web/`。**
 
 ---
 

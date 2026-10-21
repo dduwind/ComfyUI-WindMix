@@ -1,5 +1,5 @@
 import { app } from "/scripts/app.js";
-import { getLegacyPromptStudioController } from "./prompt_studio/legacy_iframe_controller.js";
+import { getLegacyPromptStudioController } from "./legacy_iframe_controller.js";
 
 const SUPPORTED_NODE_NAMES = new Set([
     "PromptStudioOutput",
@@ -78,7 +78,10 @@ function refreshExistingPromptStudioNodes() {
 }
 
 app.registerExtension({
-    name: "comfyui_studio_suite.prompt_studio_nodes",
+    // 用 WindMix 自己的命名空间：原名 comfyui_studio_suite.prompt_studio_nodes 是从
+    // ComfyUI-Studio-Suite 借来的，两个插件同时启用时 registerExtension 会因重名抛错，
+    // 后加载的那份整个文件失效。改自己这边，不动别人。
+    name: "windmix.prompt_studio_nodes",
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (!isPromptStudioNodeName(nodeData.name)) {
             return;

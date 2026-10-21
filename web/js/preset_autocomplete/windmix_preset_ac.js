@@ -5,9 +5,11 @@
 //   2) 「预设管理器」的编辑弹窗（web/windmix_preset_manager.js）
 // 共用同一个模块实例 → CSV 只下载一次（约 700KB），词库缓存也只有一份。
 //
-// 引擎是 prompt_studio 自带的 TextAreaAutoComplete（同目录 autocomplete.js，上游遗留资产），
+// 引擎是本目录的 TextAreaAutoComplete（autocomplete.js，上游 pysssss 遗留资产），
 // 它的样式由该模块顶部的 addStylesheet(import.meta.url) 自动注入主页面 <head>，
 // 对应同目录的 autocomplete.css（配色已按 :root / html.dark-theme 两套主题适配）。
+// 注意：这套「主页面补全」与 web/js/prompt_studio/（旧 Prompt Studio 弹窗桥接）
+// 是两条互不相干的线，2026-10-21 起分目录存放，别再混着改。
 import { TextAreaAutoComplete } from "./autocomplete.js";
 
 // 只走 WindMix 自己的路由（prompt_studio/api.py 注册）。

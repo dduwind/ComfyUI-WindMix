@@ -8,7 +8,7 @@
 // 与上游的差异（均为适配 WindMix 的必要改动，功能未删减）：
 //   1. $el 用绝对路径 "/scripts/ui.js" 导入（跨插件目录相对路径不可靠）；
 //   2. 不再 addStylesheet(import.meta.url)：下拉样式由 iframe 自己的
-//      prompt_static/css/autocomplete.css（.autocom-* 规则）提供；
+//      prompt_studio/web_static/css/autocomplete.css（.autocom-* 规则）提供；
 //   3. 镜像 div / 行高探测落在 element.ownerDocument（textarea 在 iframe 里，
 //      必须在同一个 document 里测量，否则字体度量跨文档不准）；
 //   4. 下拉配色用带兜底的变量（iframe 内没有 ComfyUI 的 CSS 变量，否则透明底）；
@@ -791,7 +791,8 @@ export class TextAreaAutoComplete {
 // WindMix 专用：iframe 注入 + 词库加载
 //==============================================================================
 
-// Prompt Studio iframe（prompt_static/index.html）里已有的 textarea + 挂载容器。
+// Prompt Studio iframe（路由 /WM_prompt/web_ui/index.html，实体文件
+// prompt_studio/web_static/index.html）里已有的 textarea + 挂载容器。
 // 这两个容器原本是给上游 WeiLin 插件注入用的，一直空着 —— 正好复用。
 const WM_FRAME_TARGETS = [
 	{ textarea: "prompt_text_input", container: "prompt_great_ins_autocom" },

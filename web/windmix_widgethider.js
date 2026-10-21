@@ -235,15 +235,11 @@ function hookDiTFamily(node) {
 
 const MAX_COUNT = 15;
 
+// 2026-10-21：删掉「⚡ XY Input: LoRA」「⚡ XY Input: UNet Model」两条配置——
+// 这两个类名后端已不存在（现注册键 WindMixLoraXY / WindMixUNetXY，见
+// nodes/windmix_xy_inputs.py），界面由 windmix_lora_manager.js 与
+// windmix_xy_unet_manager.js 接管，这里的路径永远不会被命中。
 const XY_INPUT_CONFIG = {
-    "⚡ XY Input: LoRA": {
-        // 简化版：固定「LoRA Names+Tags」风格，无模式切换。
-        // 无 modes——refreshXYVisibility 走 always + numbered 分支。
-        countWidget: "lora_count",
-        always: ["lora_count", "model_strength", "include_none"],
-        numbered: ["lora_name_{i}", "model_str_{i}", "tag_{i}"],
-        hidden: []
-    },
     "⚡ XY Input: LoRA Plot": {
         countWidget: null,
         numbered: [],
@@ -279,28 +275,9 @@ const XY_INPUT_CONFIG = {
                 hidden: ["X_batch_path", "X_subdirectories", "X_batch_sort"]
             }
         }
-    },
-    "⚡ XY Input: UNet Model": {
-        countWidget: "model_count",
-        numbered: ["unet_name_{i}", "clip_name_{i}", "vae_name_{i}"],
-        modes: {
-            "Model Names": {
-                always: ["input_mode", "model_count"],
-                numbered: ["unet_name_{i}"],
-                hidden: ["clip_name_{i}", "vae_name_{i}"]
-            },
-            "Model Names+Clip": {
-                always: ["input_mode", "model_count"],
-                numbered: ["unet_name_{i}", "clip_name_{i}"],
-                hidden: ["vae_name_{i}"]
-            },
-            "Model Names+Clip+VAE": {
-                always: ["input_mode", "model_count"],
-                numbered: ["unet_name_{i}", "clip_name_{i}", "vae_name_{i}"],
-                hidden: []
-            }
-        }
     }
+    // 「⚡ XY Input: UNet Model」配置已删除（类名后端不存在，UNet 轴由
+    // windmix_xy_unet_manager.js 接管），现在 XY_INPUT_CONFIG 只剩 LoRA Plot 一条。
 };
 
 function collectManagedNames(config) {
@@ -501,15 +478,8 @@ function hookXYInput(node) {
     if (!config || node._xyHooked) return;
     node._xyHooked = true;
 
-    if (node.comfyClass === "⚡ XY Input: LoRA") {
-        hookStrengthSync(node);
-        hookLoraTagAutoFill(node, false);
-        // 强制设置中文 label，避免某些 ComfyUI 版本不读 BOOLEAN widget 的 options.label
-        const inc = findWidgetByName(node, "include_none");
-        if (inc) inc.label = "添加无 LoRA 对比";
-        // 注意：include_none 是 Python INPUT_TYPES 字段，本就排在 folder_filter 动态按钮前面，
-        // 无需 reorder。严禁 splice/unshift 重排 widget 顺序，否则序列化索引错位（历史教训）。
-    }
+    // 原「⚡ XY Input: LoRA」分支（强度同步 + tag 自动填 + include_none 中文标签）
+    // 已删除：该类名后端不存在，LoRA 界面由 windmix_lora_manager.js 接管。
 
     // 监听触发 refreshXYVisibility 的目标：
     // - 旧多模式节点：input_mode 变化时切模式需要重渲
@@ -581,20 +551,11 @@ function hookXYInput(node) {
 
 const WINDMIX_NODES = new Set([
     "⚡ DiT Efficient Loader",
-    "⚡ XY Input: LoRA",
     "⚡ XY Input: LoRA Plot",
-    "⚡ XY Input: UNet Model",
 ]);
 
-// 与文件夹筛选扩展协作：当它重排 node.widgets（触发 Vue 重渲、可能重置 _state.hidden）
-// 后，立即重新应用显隐，避免 tag / batch_path 等被「洗掉」再次出现 15 个 tag 的问题。
-if (!window._wmXYRefreshBound) {
-    window._wmXYRefreshBound = true;
-    window.addEventListener("windmix:xy-refresh", (e) => {
-        const node = e?.detail?.node;
-        if (node && XY_INPUT_CONFIG[node.comfyClass]) refreshXYVisibility(node);
-    });
-}
+// 原「windmix:xy-refresh」监听已删除：唯一派发该事件的是
+// web/windmix_lora_folder_filter.js（2026-10-21 移除，它锁的类名后端已不存在）。
 
 //==============================================================================
 // 实时打字同步（Nodes 2.0 Vue 数字输入框）
@@ -666,11 +627,6 @@ app.registerExtension({
                 applyDiTFamilyConfig(node);
             } else {
                 refreshXYVisibility(node);
-                if (node.comfyClass === "⚡ XY Input: LoRA") {
-                    // 工作流加载后，值已恢复：重新同步全局强度，并按已选 LoRA 自动填 tag
-                    if (typeof node._syncStrength === "function") node._syncStrength();
-                    hookLoraTagAutoFill(node, true);
-                }
             }
         }, 0);
     }
