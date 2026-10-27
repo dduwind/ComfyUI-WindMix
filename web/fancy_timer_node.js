@@ -223,7 +223,18 @@ const FancyTimerNodeExtension = {
             };
             nodeType.prototype.onSerialize = function(o) {
                 originalOnSerialize?.apply(this, arguments);
-                o.properties = this.properties;
+                // Hand the serializer a plain copy, never the live object: our
+                // `this.properties = ...` in onNodeCreated gets wrapped in a Vue
+                // reactive Proxy under Nodes 2.0, and structuredClone() refuses
+                // Proxies outright - that throw killed the official load path in
+                // workflowStore.createNewWorkflow() after the canvas was cleared.
+                // Vue reactivity is deep, so a shallow copy would still leak the
+                // nested proxies (e.g. legacy ue_properties); round-trip instead.
+                // If anything resists JSON, leave whatever the official serializer
+                // already wrote into o.properties rather than poison it.
+                try {
+                    o.properties = JSON.parse(JSON.stringify(this.properties ?? {}));
+                } catch (e) { /* keep the official copy */ }
             };
             nodeType.prototype.onConfigure = function(info) {
                 originalOnConfigure?.apply(this, arguments);
