@@ -20,8 +20,12 @@ const DATA_WIDGET = "lora_data";
 const DEF_STRENGTH = 1.0;
 export const MAX_ROWS = 50;
 
-// 固定高度（px）：搜索行 32 + 间距 7 + 列表 292 + 间距 7 + 底部按钮 31
-const LIST_H = 292;
+// 固定高度（px）：搜索行 32 + 间距 7 + 列表 142 + 间距 7 + 底部按钮 31
+// 这个值同时是「新建节点的默认高」和「手动拖矮的下限」——官方前端在拖拽的每一帧
+// 都拿 node.computeSize() 当最小尺寸（LGraphCanvas.ts 的 Enforce minimum size），
+// 而 computeSize 就是把下面 domWidget 上报的 UI_H 累加出来的。想让它能拖得更小，
+// 只能把这里改小，改 lockBottomBar 里的 MIN_CONTAINER_H 没用（那条只管程序改尺寸）。
+const LIST_H = 142;
 export const UI_H = 32 + 7 + LIST_H + 7 + 31;
 export const MIN_NODE_W = 400;
 // 容器高 = 节点高 - chrome（标题栏 + 内边距），chrome 实测失败时用 DEFAULT_CHROME
