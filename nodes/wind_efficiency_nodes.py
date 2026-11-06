@@ -157,13 +157,37 @@ TEXT_NODE_PATTERNS = [
     "Condition", "条件", "CLIPText",
 ]
 
+WM_PROMPT_TEXT_KEY = "wm_text"
+
+def stamp_conditioning_text(conditioning, text):
+    """把「这次真正拿去编码的那串文本」盖在 conditioning 上，供下游 生成信息 回读。
+
+    为什么要盖：工作流 JSON 里存的只有节点模板（预设文本的条目原文、wildcard 的写法），
+    随机抽取和展开是执行那一刻才算出来的，回溯连线永远拿不到真词。而加载器执行时收到的
+    `positive` 参数已经是算完的最终串，在这里盖一下就等于把"当时喂给文本编码器的东西"留了底。
+
+    ComfyUI 自己不认识 `wm_text` 这个键，只是 conditioning 的元信息 dict 里多一项，
+    不参与采样；任何异常都吞掉，绝不让元数据把出图带崩。
+    """
+    try:
+        if not text or not isinstance(conditioning, list) or not conditioning:
+            return conditioning
+        first = conditioning[0]
+        if isinstance(first, (list, tuple)) and len(first) > 1 and isinstance(first[1], dict):
+            if str(text).strip():
+                first[1][WM_PROMPT_TEXT_KEY] = str(text)
+    except Exception:
+        pass
+    return conditioning
+
 def extract_text_from_conditioning(conditioning):
+    """读回 stamp_conditioning_text 盖在 conditioning 上的文本，只认 WindMix 自己的 wm_text。"""
     texts = []
     if conditioning is None:
         return None
     for item in conditioning:
         if len(item) > 1 and isinstance(item[1], dict):
-            t = item[1].get("zml_text", "")
+            t = item[1].get(WM_PROMPT_TEXT_KEY, "")
             if t:
                 texts.append(t)
     return "\n".join(texts) if texts else None
@@ -233,12 +257,15 @@ def traverse_model_chain(prompt, start_node_id):
         if not node:
             break
         class_type, inputs = node.get("class_type", ""), node.get("inputs", {})
+        # ⚠️ 判断顺序不能反过来：类名 "⚡ DiT Efficient Loader" 里就含有 "Efficient Loader"
+        # 这个子串，先判普通加载器会把 DiT 一起截走，然后去读 DiT 上并不存在的 ckpt_name
+        # → 返回 None → 生成信息里的 model 字段永远是空的。DiT 的模型控件叫 unet_name。
+        if "DiT Efficient Loader" in class_type:
+            return inputs.get("unet_name")
         if "CheckpointLoader" in class_type:
             return inputs.get("ckpt_name")
         if "Efficient Loader" in class_type:
             return inputs.get("ckpt_name")
-        if "DiT Efficient Loader" in class_type:
-            return inputs.get("unet_name")
         next_link = inputs.get("model") or inputs.get("模型")
         if next_link and isinstance(next_link, list):
             current_id = str(next_link[0])
@@ -2725,6 +2752,10 @@ class Wind_DiTEfficientLoader:
         #    SD1.5/SDXL advanced weighting and can subtly alter DiT conditioning.
         positive_encoded = CLIPTextEncode().encode(clip, positive)[0]
         negative_encoded = CLIPTextEncode().encode(clip, negative)[0]
+        # 把这次真正编码用的串盖回 conditioning，让下游 效率采样器 的「生成信息」能拿到
+        # 展开后的真词（预设文本随机 / wildcard 都算完了），而不是工作流里的模板。
+        stamp_conditioning_text(positive_encoded, positive)
+        stamp_conditioning_text(negative_encoded, negative)
 
         # 7) Dependencies (16 stock positions mirrored, then DiT extras)
         #    Note: index 3 is the legacy `clip_skip` slot. DiT text encoders (Qwen/T5) do NOT
@@ -2869,7 +2900,19 @@ class Wind_SaveImageWithMetadata:
             if save_text_block and pos_for_block:
                 metadata.add_text(DEFAULT_TEXT_BLOCK_KEY, pos_for_block, zip=True)
 
-            fname = f"{filename}.png" if len(图像) == 1 else f"{filename}_{counter}.png"
+            # 文件名撞车就往后挪位。
+            # 旧写法是「一张就不带序号」，而 🧩 Prompt Groups 那种批量是每段词各跑一次本
+            # 节点（官方执行器按 list 逐元素重复下游节点），加速模型 8 步不到 1 秒就出两张，
+            # 两次运行的 WM-%H%M%S 落在同一秒 → 后一张原地覆盖前一张：预览看到两张、盘上只剩最后一张。
+            # 多张那条也顺手从 _1 改成 5 位补零，和官方 SaveImage 的序号风格一致。
+            cand = filename if len(图像) == 1 else f"{filename}_{counter:05d}"
+            bump = 0
+            while os.path.exists(os.path.join(full_output_folder, cand + ".png")):
+                bump += 1
+                if bump > 99999:
+                    break
+                cand = f"{filename}_{counter + bump:05d}"
+            fname = cand + ".png"
             img.save(os.path.join(full_output_folder, fname), pnginfo=metadata, compress_level=self.compress_level)
             results.append({"filename": fname, "subfolder": subfolder, "type": self.type})
             counter += 1
