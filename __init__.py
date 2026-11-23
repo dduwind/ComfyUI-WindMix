@@ -16,7 +16,9 @@
 #     so one group may span multiple lines/paragraphs.
 #
 # Third batch, from ComfyUI-Studio-Suite:
-#   - PromptStudioOutput / PromptStudioPositiveOutput / PromptStudioNegativeOutput
+#   - WMPromptOutput / WMPromptPositiveOutput / WMPromptNegativeOutput
+#     (renamed from Studio-Suite's PromptStudio* so both plugins can coexist;
+#      ComfyUI node type names are global — a duplicate is silently overwritten)
 #     (prompt_studio/ package: nodes.py + api.py HTTP routes + web/js/prompt_studio/*)
 #   - The package's __init__ registers its routes on import; we import it as a
 #     top-level subpackage and merge its node mappings below.

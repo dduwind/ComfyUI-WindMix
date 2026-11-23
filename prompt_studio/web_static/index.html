@@ -1151,15 +1151,15 @@
                     const editingBox = document.getElementById('yourIsEditing')
                     const notePromptBox = document.getElementById('notePromptBox')
 
-                    if(e.data.nodeName == "PromptStudioPositiveOutput"){
+                    if(e.data.nodeName == "WMPromptPositiveOutput"){
                         editingBox.innerText=""
                         ge_box.style.display = "block"
                         ng_box.style.display = "none"
-                    }else if(e.data.nodeName == "PromptStudioNegativeOutput"){
+                    }else if(e.data.nodeName == "WMPromptNegativeOutput"){
                         editingBox.innerText=""
                         ge_box.style.display = "none"
                         ng_box.style.display = "block"
-                    }else if(e.data.nodeName =="PromptStudioOutput"){
+                    }else if(e.data.nodeName =="WMPromptOutput"){
                         editingBox.innerText=""
                         ge_box.style.display = "block"
                         ng_box.style.display = "block"
@@ -1192,15 +1192,15 @@
                 const editingBox = document.getElementById('yourIsEditing')
                 const notePromptBox = document.getElementById('notePromptBox')
 
-                if(e.data.nodeName == "PromptStudioPositiveOutput"){
+                if(e.data.nodeName == "WMPromptPositiveOutput"){
                     editingBox.innerText=""
                     ge_box.style.display = "block"
                     ng_box.style.display = "none"
-                }else if(e.data.nodeName == "PromptStudioNegativeOutput"){
+                }else if(e.data.nodeName == "WMPromptNegativeOutput"){
                     editingBox.innerText=""
                     ge_box.style.display = "none"
                     ng_box.style.display = "block"
-                }else if( e.data.nodeName == "PromptStudioOutput"){
+                }else if( e.data.nodeName == "WMPromptOutput"){
                     editingBox.innerText=""
                     ge_box.style.display = "block"
                     ng_box.style.display = "block"

@@ -124,7 +124,7 @@ class LegacyPromptStudioController {
             n_value: this.fields?.negative ? widgetValue(this.fields.negative.widget) : "",
             randomid: this.randomId,
             type: "prompt",
-            nodeName: this.node?.comfyClass || this.node?.type || "PromptStudioOutput",
+            nodeName: this.node?.comfyClass || this.node?.type || "WMPromptOutput",
         }, "*");
     }
 

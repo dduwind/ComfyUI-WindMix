@@ -96,9 +96,9 @@ ComfyUI/
 | 🚀 效率节点 | 🚀 模型组合加载器 | `⚡ Model Set Loader` | 分别选 unet/clip/vae，一次输出 MODEL+CLIP+VAE，每槽支持 `[none]` |
 | 🎨 Prompt Studio | 🎨 合并文本 | `⚡ Prompt Studio Merge Text` | 最多 20 个动态 STRING 输入 + 可调分隔符 |
 | 🎨 Prompt Studio | 🎨 预设文本 | `WindMixPresetText` | 可增删/拖拽/启停的多行文本，支持预设管理器 |
-| 🎨 Prompt Studio | 🎨 Prompt Studio 双提示词输出 | `PromptStudioOutput` | 移植自 Studio-Suite 的 iframe 提示词编辑器 |
-| 🎨 Prompt Studio | 🎨 Prompt Studio 正向输出 | `PromptStudioPositiveOutput` | 同上，只输出正向 |
-| 🎨 Prompt Studio | 🎨 Prompt Studio 反向输出 | `PromptStudioNegativeOutput` | 同上，只输出反向 |
+| 🎨 Prompt Studio | 🎨 Prompt Studio 双提示词输出 | `WMPromptOutput` | 移植自 Studio-Suite 的 iframe 提示词编辑器；改名以便与 Studio-Suite 原版共存 |
+| 🎨 Prompt Studio | 🎨 Prompt Studio 正向输出 | `WMPromptPositiveOutput` | 同上，只输出正向 |
+| 🎨 Prompt Studio | 🎨 Prompt Studio 反向输出 | `WMPromptNegativeOutput` | 同上，只输出反向 |
 | 📊 xy图表 | 📊 XY 图表 | `⚡ XY Plot` | XY Plot 引擎，输出拼接网格图 |
 | 📊 xy图表 | 📊 XY 输入: LoRA 图表 | `⚡ XY Input: LoRA Plot` | LoRA 轴专用图表变体 |
 | 📊 xy图表 | ~~📊 XY 输入: UNet模型~~ | `⚡ XY Input: UNet Model` | 已删除，功能并入 `WindMixUNetXY` |

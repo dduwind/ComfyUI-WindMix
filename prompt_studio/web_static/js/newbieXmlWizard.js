@@ -499,7 +499,7 @@
             if (!event.data || (event.data.handel !== "openPromptBox" && event.data.handel !== "responsePromptBox")) {
                 return;
             }
-            state.targetPromptType = event.data.nodeName === "PromptStudioNegativeOutput" ? "negative" : "positive";
+            state.targetPromptType = event.data.nodeName === "WMPromptNegativeOutput" ? "negative" : "positive";
             syncTargetWarning();
         });
     }

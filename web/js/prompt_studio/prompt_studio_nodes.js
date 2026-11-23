@@ -2,9 +2,9 @@ import { app } from "/scripts/app.js";
 import { getLegacyPromptStudioController } from "./legacy_iframe_controller.js";
 
 const SUPPORTED_NODE_NAMES = new Set([
-    "PromptStudioOutput",
-    "PromptStudioPositiveOutput",
-    "PromptStudioNegativeOutput",
+    "WMPromptOutput",
+    "WMPromptPositiveOutput",
+    "WMPromptNegativeOutput",
 ]);
 
 const BUTTON_NAMES = new Set(["Open Prompt Studio", "打开 Prompt Studio"]);

@@ -6,7 +6,7 @@ def _is_chinese_locale():
     return value.lower().startswith("zh")
 
 
-class PromptStudioOutput:
+class WMPromptOutput:
     CATEGORY = "⚡ WindMix/🎨 Prompt Studio"
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("positive", "negative")
@@ -40,7 +40,7 @@ class PromptStudioOutput:
         return (positive, negative)
 
 
-class PromptStudioPositiveOutput:
+class WMPromptPositiveOutput:
     CATEGORY = "⚡ WindMix/🎨 Prompt Studio"
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("positive",)
@@ -66,7 +66,7 @@ class PromptStudioPositiveOutput:
         return (positive,)
 
 
-class PromptStudioNegativeOutput:
+class WMPromptNegativeOutput:
     CATEGORY = "⚡ WindMix/🎨 Prompt Studio"
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("negative",)
@@ -93,23 +93,23 @@ class PromptStudioNegativeOutput:
 
 
 NODE_CLASS_MAPPINGS = {
-    "PromptStudioOutput": PromptStudioOutput,
-    "PromptStudioPositiveOutput": PromptStudioPositiveOutput,
-    "PromptStudioNegativeOutput": PromptStudioNegativeOutput,
+    "WMPromptOutput": WMPromptOutput,
+    "WMPromptPositiveOutput": WMPromptPositiveOutput,
+    "WMPromptNegativeOutput": WMPromptNegativeOutput,
 }
 
 
 if _is_chinese_locale():
     NODE_DISPLAY_NAME_MAPPINGS = {
-        "PromptStudioOutput": "🎨 Prompt Studio 双提示词输出",
-        "PromptStudioPositiveOutput": "🎨 Prompt Studio 正向输出",
-        "PromptStudioNegativeOutput": "🎨 Prompt Studio 反向输出",
+        "WMPromptOutput": "🎨 Prompt Studio 双提示词输出",
+        "WMPromptPositiveOutput": "🎨 Prompt Studio 正向输出",
+        "WMPromptNegativeOutput": "🎨 Prompt Studio 反向输出",
     }
 else:
     NODE_DISPLAY_NAME_MAPPINGS = {
-        "PromptStudioOutput": "🎨 Prompt Studio Output",
-        "PromptStudioPositiveOutput": "🎨 Prompt Studio Positive Output",
-        "PromptStudioNegativeOutput": "🎨 Prompt Studio Negative Output",
+        "WMPromptOutput": "🎨 Prompt Studio Output",
+        "WMPromptPositiveOutput": "🎨 Prompt Studio Positive Output",
+        "WMPromptNegativeOutput": "🎨 Prompt Studio Negative Output",
     }
 
 
