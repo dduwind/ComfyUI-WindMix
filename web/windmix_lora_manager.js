@@ -15,6 +15,23 @@ import { app } from "/scripts/app.js";
 // 几何引擎按 node.__wm2* 这组字段名读缓存，用它的节点必须沿用同样的字段名。
 // =============================================================================
 
+// 主题桥接：新版 ComfyUI（0.42+）把深浅色写在 <html style="color-scheme:dark|light">，
+// 旧版用 <html class="dark-theme">。这里只把新版的信号翻译成旧版 class，让全插件
+// 基于 html.dark-theme 的样式（wm2 那套共用 UI）在新版继续生效。
+// 旧版没有内联 color-scheme → 整个函数跳过，老 ComfyUI 自己的 class 逻辑原样不动。
+// 同时挂 Observer 盯着 style 变化，运行中切主题也能跟随（首帧可能还没设 color-scheme）。
+(function syncLegacyDarkClass() {
+    const html = document.documentElement;
+    const sync = () => {
+        const cs = html.style.colorScheme;
+        if (cs === "dark" || cs === "light") {
+            html.classList.toggle("dark-theme", cs === "dark");
+        }
+    };
+    sync();
+    new MutationObserver(sync).observe(html, { attributes: true, attributeFilter: ["style"] });
+})();
+
 const NODE_TYPES = ["WindMixLoraStack", "WindMixLoraLoaderModelOnly", "WindMixLoraXY"];
 const DATA_WIDGET = "lora_data";
 const DEF_STRENGTH = 1.0;
