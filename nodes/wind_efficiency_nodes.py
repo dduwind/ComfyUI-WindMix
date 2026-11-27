@@ -1454,7 +1454,14 @@ class Wind_KSampler:
                                 clip = clip.clone()
                         if dit_shift and dit_shift > 0:
                             try:
-                                model.model.model_sampling.set_parameters(shift=float(dit_shift))
+                                # Preserve the model's native multiplier (FLOW models = 1.0);
+                                # a bare shift override resets it to 1000 -> garbled images.
+                                _samp = model.model.model_sampling
+                                _old_mult = getattr(_samp, "multiplier", None)
+                                if _old_mult is not None:
+                                    _samp.set_parameters(shift=float(dit_shift), multiplier=float(_old_mult))
+                                else:
+                                    _samp.set_parameters(shift=float(dit_shift))
                             except Exception as _e:
                                 print(f"[WindMix] XY 输入: UNet2（对象直连）could not set shift on {type(model.model.model_sampling).__name__}: {_e}")
                                 class _MS(comfy.model_sampling.ModelSamplingFlux, comfy.model_sampling.CONST):
@@ -2460,7 +2467,16 @@ def _windmix_dit_load(unet_name, clip_name, vae_name, model_family, shift, clip_
     # Only override the shift when the user explicitly sets a value > 0.
     if shift and shift > 0:
         try:
-            model.model.model_sampling.set_parameters(shift=float(shift))
+            # Preserve the model's native multiplier. ModelSamplingDiscreteFlow.set_parameters
+            # defaults multiplier to 1000, but MOSS/Qwen/Krea2/Z-Image ship multiplier=1.0;
+            # overriding shift alone resets it and corrupts the sigma schedule (garbled images).
+            # Flux-style samplers have no multiplier attribute -> keep the original behavior.
+            _samp = model.model.model_sampling
+            _old_mult = getattr(_samp, "multiplier", None)
+            if _old_mult is not None:
+                _samp.set_parameters(shift=float(shift), multiplier=float(_old_mult))
+            else:
+                _samp.set_parameters(shift=float(shift))
         except Exception as e:
             print(f"[WindMix] DiT loader could not set shift on {type(model.model.model_sampling).__name__}: {e}")
             class _MS(comfy.model_sampling.ModelSamplingFlux, comfy.model_sampling.CONST):
@@ -2556,6 +2572,15 @@ class Wind_DiTEfficientLoader:
             "clip_type": "qwen_image",
             "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
             "vae_name": "qwen_image_2.1_vae_bf16.safetensors",
+        },
+        # MOSS-Image (OpenMOSS, 5B DiT on FLUX.2 latent). Official combo, matching the
+        # files already on this machine: Qwen3.5-9B TE + FLUX.2 VAE. clip_type must be
+        # "moss_image" (CLIPType.MOSS_IMAGE) — Core dispatches the stock Qwen3.5-9B to
+        # the MOSS ImageTokenizer / last-hidden-state path only under that enum.
+        "MOSS Image": {
+            "clip_type": "moss_image",
+            "clip_name": "qwen3.5_9b_int8_convrot.safetensors",
+            "vae_name": "flux2-vae.safetensors",
         },
         "Generic DiT": {
             "clip_type": "flux",
@@ -2698,7 +2723,15 @@ class Wind_DiTEfficientLoader:
         # Only override the shift when the user explicitly sets a value > 0.
         if shift and shift > 0:
             try:
-                model.model.model_sampling.set_parameters(shift=float(shift))
+                # Preserve the model's native multiplier (see _windmix_dit_load): a bare
+                # set_parameters(shift=...) resets multiplier to 1000 on FLOW models whose
+                # native config is 1.0 -> garbled images. Flux samplers have no multiplier.
+                _samp = model.model.model_sampling
+                _old_mult = getattr(_samp, "multiplier", None)
+                if _old_mult is not None:
+                    _samp.set_parameters(shift=float(shift), multiplier=float(_old_mult))
+                else:
+                    _samp.set_parameters(shift=float(shift))
             except Exception as e:
                 print(f"[WindMix] DiT loader could not set shift on {type(model.model.model_sampling).__name__}: {e}")
                 class ModelSamplingAdvanced(comfy.model_sampling.ModelSamplingFlux, comfy.model_sampling.CONST):

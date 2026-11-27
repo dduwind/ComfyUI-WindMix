@@ -171,23 +171,46 @@ function recompute(node) {
 // Single source of truth: FAMILY_CONFIG comes from Python via the model_family
 // widget's options (serialized in /object_info), so new families (e.g.
 // Qwen-Image 2.1) follow automatically with no JS-side copy to drift.
+//
+// ComfyUI 0.46 (Vue/Nodes 2.0) drops custom widget options like `family_config`
+// when it builds widgets — only `values`/`advanced` survive. So we ALSO read the
+// same config straight from /object_info (process-wide cache) as a fallback.
 //==============================================================================
+
+let _ditFamilyConfigFromApi = null;
+let _ditFamilyConfigPromise = null;
+
+function ensureDiTFamilyConfig() {
+    if (_ditFamilyConfigFromApi) return Promise.resolve(_ditFamilyConfigFromApi);
+    if (_ditFamilyConfigPromise) return _ditFamilyConfigPromise;
+    _ditFamilyConfigPromise = fetch("/object_info")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((oi) => {
+            const mf = oi?.["⚡ DiT Efficient Loader"]?.input?.required?.model_family;
+            _ditFamilyConfigFromApi = mf?.[1]?.family_config || null;
+            return _ditFamilyConfigFromApi;
+        })
+        .catch(() => null)
+        .finally(() => { _ditFamilyConfigPromise = null; });
+    return _ditFamilyConfigPromise;
+}
 
 function getDiTFamilyConfig(node) {
     const w = findWidgetByName(node, "model_family");
-    return w?.options?.family_config || null;
+    // Old frontends keep the custom option; 0.46 needs the /object_info fallback.
+    return w?.options?.family_config || _ditFamilyConfigFromApi || null;
 }
 
 function setComboIfPresent(widget, value) {
     if (!widget || value === undefined || value === null) return;
     const opts = widget.options?.values;
     if (Array.isArray(opts) && !opts.includes(value)) return;
-    widget.value = value;
+    setWidgetValue(widget, value);  // 双写：Vue 前端 _state.value 才是界面即时源
     if (typeof widget.callback === "function") widget.callback(value);
 }
 
 function applyDiTFamilyConfig(node) {
-    const family = findWidgetByName(node, "model_family")?.value;
+    const family = getWidgetValue(findWidgetByName(node, "model_family"));
     const cfgMap = getDiTFamilyConfig(node);
     const cfg = cfgMap ? cfgMap[family] : null;
     if (!cfg) return;
@@ -210,22 +233,29 @@ function hookDiTFamily(node) {
     const origCallback = familyWidget.callback;
     familyWidget.callback = function (...args) {
         const r = origCallback ? origCallback.apply(this, args) : undefined;
-        applyDiTFamilyConfig(node);
+        // Make sure config is loaded before applying (0.46 path fetches from API).
+        if (getDiTFamilyConfig(node)) {
+            applyDiTFamilyConfig(node);
+        } else {
+            ensureDiTFamilyConfig().then(() => applyDiTFamilyConfig(node));
+        }
         return r;
     };
 
-    // Initial apply (retry until options are populated)
+    // Initial apply (retry until options are populated AND API config is ready)
     let attempts = 0;
     const tryApply = () => {
         applyDiTFamilyConfig(node);
         const cfgMap = getDiTFamilyConfig(node);
-        const targetName = cfgMap?.[familyWidget.value]?.clip_name ?? "Auto";
+        const targetName = cfgMap?.[getWidgetValue(familyWidget)]?.clip_name ?? "Auto";
         const opts = findWidgetByName(node, "clip_name")?.options?.values;
         attempts++;
-        if ((!Array.isArray(opts) || !opts.includes(targetName)) && attempts < 20) {
+        if ((!cfgMap || !Array.isArray(opts) || !opts.includes(targetName)) && attempts < 40) {
             setTimeout(tryApply, 100);
         }
     };
+    // Kick off the API fetch up front so the first apply isn't stuck at Auto.
+    ensureDiTFamilyConfig().then(tryApply);
     setTimeout(tryApply, 50);
 }
 
